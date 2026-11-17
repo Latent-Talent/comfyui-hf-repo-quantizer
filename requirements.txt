@@ -1,0 +1,4 @@
+huggingface_hub>=0.24,<2
+safetensors>=0.4.3
+# Install native converter separately in the same ComfyUI Python environment:
+# python -m pip install git+https://github.com/NidAll/comfyui-native-quantizer.git
