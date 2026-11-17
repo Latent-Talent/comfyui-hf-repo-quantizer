@@ -108,9 +108,14 @@ def capabilities() -> dict:
         if p.returncode:
             raise RuntimeError((p.stderr or p.stdout).strip()[-500:])
         listing = p.stdout.lower()
-        supported = [f for f in FORMATS
-                     if f not in EXPERIMENTAL_FORMATS or
-                     re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", listing)]
+        advertised = set()
+        for line in listing.splitlines()[1:]:
+            token = line.strip().split(maxsplit=1)[0] if line.strip() else ""
+            if token in FORMATS:
+                advertised.add(token)
+        # Do not assume a runtime format is exportable merely because its
+        # Comfy Kitchen kernel is present or the UI lists it.
+        supported = [f for f in FORMATS if f in advertised]
         return {"installed": True, "formats": supported,
                 "notes": {"w3a8": "Requires a converter exporting native W3A8 and a matching ComfyUI loader.",
                           "w5a8": "Requires a converter exporting the nested W5A8 checkpoint and matching loader."}}
