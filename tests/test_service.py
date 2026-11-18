@@ -121,7 +121,7 @@ class SourceTests(unittest.TestCase):
     def test_local_mtp_explicit_path_and_auto_discovery(self):
         import tempfile
         with tempfile.TemporaryDirectory() as temp:
-            folder = pathlib.Path(temp)
+            folder = Path(temp)
             source = folder / "model.safetensors"
             sidecar = folder / "model-mtp-restored.safetensors"
             source.write_bytes(b"test")
