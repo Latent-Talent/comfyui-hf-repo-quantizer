@@ -23,6 +23,10 @@ FORMATS = ("w4a8", "w3a8", "w5a8", "w6a8", "int8-convrot", "int8",
            "nvfp4", "mxfp8")
 EXPERIMENTAL_FORMATS = {"w3a8", "w5a8"}
 RESUMABLE_FORMATS = {"w4a8", "w6a8", "mixed"}
+OUTPUT_TYPES = ("native_llm", "minimax_h3_te")
+CONVROT_MODES = ("auto", "enabled", "disabled")
+INHERENT_CONVROT = {"w3a8", "w4a8", "w5a8", "w6a8", "w4a4"}
+NO_CONVROT = {"bf16", "fp16", "fp8-e4m3", "fp8-e5m2", "nvfp4", "mxfp8"}
 REPO_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
 MEMORY_RE = re.compile(r"^[1-9]\d*(?:[KMG])$", re.I)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -185,18 +189,52 @@ def capabilities() -> dict:
     return result
 
 
+def _effective_format(fmt: str, convrot_mode: str) -> tuple[str, bool]:
+    """Apply ConvRot where supported, never silently disable inherent rotations."""
+    if convrot_mode not in CONVROT_MODES:
+        raise ValueError("ConvRot mode must be auto, enabled or disabled.")
+    if convrot_mode == "auto":
+        return fmt, False
+    if fmt in INHERENT_CONVROT:
+        if convrot_mode == "disabled":
+            raise ValueError(f"{fmt.upper()} requires built-in ConvRot; use Auto or Enabled.")
+        return fmt, False
+    if fmt == "int8":
+        return ("int8-convrot" if convrot_mode == "enabled" else "int8"), False
+    if fmt == "int8-convrot":
+        return ("int8" if convrot_mode == "disabled" else "int8-convrot"), False
+    if fmt == "mixed":
+        if convrot_mode == "disabled":
+            raise ValueError("Mixed formats can include ConvRot and cannot guarantee "
+                             "rotation-free output.")
+        return fmt, convrot_mode == "enabled"
+    if fmt in NO_CONVROT:
+        if convrot_mode == "enabled":
+            raise ValueError(f"{fmt.upper()} does not support ConvRot; use Auto or Disabled.")
+        return fmt, False
+    raise ValueError(f"Unsupported ConvRot combination: {fmt}, {convrot_mode}")
+
+
 def _check_options(payload: dict) -> dict:
     src = str(payload.get("model_source", "")).strip()
     source = parse_source(src, str(payload.get("revision", "main")))
     fmt = str(payload.get("format", "w4a8")).lower()
     if fmt not in FORMATS:
         raise ValueError("Unknown target format.")
+    output_type = str(payload.get("output_type", "native_llm"))
+    if output_type not in OUTPUT_TYPES:
+        raise ValueError("Unknown output type.")
+    convrot_mode = str(payload.get("convrot_mode", "auto"))
+    effective_fmt, mixed_int8_convrot = _effective_format(fmt, convrot_mode)
+    if output_type == "minimax_h3_te" and payload.get("include_restored_mtp", False) is True:
+        raise ValueError("MiniMax H3 TE is a 50-layer conditioning encoder and does "
+                         "not use MTP. Disable Include Restored MTP.")
     caps = capabilities()
     if not caps["installed"]:
         raise ValueError(caps["error"])
-    if fmt not in caps["formats"]:
+    if effective_fmt not in caps["formats"]:
         reason = caps.get("lowbit_error", "Native loader or Kitchen exporter not available")
-        raise ValueError(f"{fmt.upper()} exporter unavailable: {reason}. "
+        raise ValueError(f"{effective_fmt.upper()} exporter unavailable: {reason}. "
                          "Install the W3/W5-compatible ComfyUI and Comfy Kitchen branches.")
     device = str(payload.get("device", "auto"))
     if device not in ("auto", "cuda", "cpu"):
@@ -218,8 +256,10 @@ def _check_options(payload: dict) -> dict:
                 or not mtp_source.lower().endswith(".safetensors")):
             raise ValueError("MTP source must be an existing local safetensors file "
                              "or a safetensors filename in the selected HF repository.")
-    return dict(source=source, source_text=src, format=fmt, device=device,
-                max_memory=mem, output_name=name,
+    return dict(source=source, source_text=src, format=effective_fmt,
+                requested_format=fmt, output_type=output_type,
+                convrot_mode=convrot_mode, mixed_int8_convrot=mixed_int8_convrot,
+                device=device, max_memory=mem, output_name=name,
                 keep_source=payload.get("keep_source", True) is True,
                 overwrite=payload.get("overwrite", False) is True,
                 include_restored_mtp=payload.get("include_restored_mtp", False) is True,
@@ -267,6 +307,7 @@ def start_job(payload: dict) -> dict:
         job_id = uuid.uuid4().hex
         _jobs[job_id] = dict(id=job_id, state="queued", message="Queued",
                              source=cfg["source_text"], format=cfg["format"],
+                             output_type=cfg["output_type"], convrot_mode=cfg["convrot_mode"],
                              progress=0.0, output="", log=[], updated_at=time.time())
         _cancel[job_id] = threading.Event()
         _running_id = job_id
@@ -462,6 +503,8 @@ def _run_converter(source_path: Path, output: Path, cfg: dict, job_id: str,
                                  "--validate")
     if cfg["overwrite"]:
         cmd += ["--overwrite"]
+    if cfg["format"] == "mixed" and cfg.get("mixed_int8_convrot", False):
+        cmd += ["--enable-int8-convrot"]
     if cfg["format"] in RESUMABLE_FORMATS:
         cmd += ["--resume"]
     # The subprocess uses the same Python interpreter as ComfyUI.
@@ -545,7 +588,8 @@ def _worker(job_id: str, cfg: dict):
             stem = repo.split("/")[-1]
         _raise_if_cancelled(evt)
         stem = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:85].strip("._") or "model"
-        outfile = cfg["output_name"] or f"{stem}_{cfg['format']}"
+        suffix = "_minimax_h3_te" if cfg["output_type"] == "minimax_h3_te" else ""
+        outfile = cfg["output_name"] or f"{stem}{suffix}_{cfg['format']}"
         output = output_dir / f"{outfile}.safetensors"
         if output.exists() and not cfg["overwrite"]:
             raise FileExistsError(f"{output.name} already exists. Choose a different name or enable overwrite.")
