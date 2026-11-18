@@ -117,9 +117,11 @@ def inspect_mtp(original: Path, restored: Path) -> tuple[dict, dict]:
     return report, incoming
 
 
-def _copy(source, dest, offset, length):
+def _copy(source, dest, offset, length, should_cancel=None):
     source.seek(offset)
     while length:
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("MTP checkpoint merge cancelled.")
         data = source.read(min(COPY_BLOCK, length))
         if not data:
             raise OSError("Unexpected EOF during MTP checkpoint publication.")
@@ -128,7 +130,8 @@ def _copy(source, dest, offset, length):
 
 
 def apply_restored_mtp(original: Path, converted: Path, restored: Path,
-                       output: Path, overwrite: bool = False) -> dict:
+                       output: Path, overwrite: bool = False,
+                       should_cancel=None) -> dict:
     """Merge after quantization, avoiding a duplicate 55+ GB unquantized model.
 
     'converted' should be a separate temporary checkpoint. The output is only
@@ -206,7 +209,7 @@ def apply_restored_mtp(original: Path, converted: Path, restored: Path,
                     path = ref["path"]
                     if path not in open_files:
                         open_files[path] = path.open("rb")
-                    _copy(open_files[path], out, ref["start"], ref["size"])
+                    _copy(open_files[path], out, ref["start"], ref["size"], should_cancel=should_cancel)
             finally:
                 for f in open_files.values():
                     f.close()
@@ -215,6 +218,8 @@ def apply_restored_mtp(original: Path, converted: Path, restored: Path,
         checked, checked_meta = _tensor_header(temporary)
         if set(checked) != set(final_refs) or sum(x["size"] for x in checked.values()) != cursor:
             raise RuntimeError("Merged checkpoint failed tensor header verification.")
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("MTP checkpoint merge cancelled.")
         if output.exists() and not overwrite:
             raise FileExistsError(f"Output already exists: {output}")
         os.replace(temporary, output)
