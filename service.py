@@ -568,7 +568,8 @@ def _worker(job_id: str, cfg: dict):
                 _set(job_id, state="validating", progress=0.96,
                      message="Merging restored MTP into native checkpoint")
                 report = apply_restored_mtp(source_path, stage, restored_mtp_path,
-                                            output, overwrite=cfg["overwrite"])
+                                            output, overwrite=cfg["overwrite"],
+                                            should_cancel=evt.is_set)
                 _set(job_id, mtp_report=report)
                 _log(job_id, "MTP applied: " + json.dumps(report))
         finally:
