@@ -50,8 +50,24 @@ def _inverse_cholesky(x, damp=0.05):
     raise ValueError("Calibration Hessian is not numerically positive definite.")
 
 
+def prepare_calibration(train, valid, hessian_block=128, damp=0.05,
+                        convrot_groupsize=256):
+    """Cache activation rotation and Hessian inverses once per layer."""
+    x = convrot_inputs(train.float(), convrot_groupsize).float()
+    v = convrot_inputs(valid.float(), convrot_groupsize).float()
+    if x.ndim != 2 or v.ndim != 2 or x.shape[1] != v.shape[1]:
+        raise ValueError("Train and holdout activation dimensions do not match.")
+    if x.shape[1] % hessian_block:
+        raise ValueError("Activation input width is not Hessian-block aligned.")
+    inverses = [
+        _inverse_cholesky(x[:, c:c+hessian_block], damp)
+        for c in range(0, x.shape[1], hessian_block)
+    ]
+    return (x, v, inverses)
+
+
 def gptq_codes(rotated_weight, train_rot, scale_rel, scale_channel,
-               codebook, hessian_block=128, damp=0.05):
+               codebook, hessian_block=128, damp=0.05, upper_blocks=None):
     """Sequential GPTQ error feedback, independently for bounded input blocks.
 
     Rows are independent. Source/scales are original Kitchen quantization
@@ -80,7 +96,8 @@ def gptq_codes(rotated_weight, train_rot, scale_rel, scale_channel,
     # We must quantize against that grid, not ideal continuous LUT values.
     for left in range(0, k, hessian_block):
         end = left + hessian_block
-        upper = _inverse_cholesky(x[:, left:end], damp)
+        upper = (upper_blocks[left // hessian_block] if upper_blocks is not None
+                 else _inverse_cholesky(x[:, left:end], damp))
         working = w[:, left:end].clone()
         for j in range(hessian_block):
             col = left + j
@@ -123,7 +140,7 @@ def _error_metrics(wrot, qrot, valid_rot):
 
 def calibrated_candidate(weight, train_activations, valid_activations, bits,
                          hessian_block=128, damp=0.05, group_size=16,
-                         convrot_groupsize=256):
+                         convrot_groupsize=256, prepared=None):
     """Quantize + error-compensate one row chunk. Output is native Kitchen data."""
     if bits not in (3, 4):
         raise ValueError("Calibrated candidate supports native W3/W4 layouts.")
@@ -141,10 +158,14 @@ def calibrated_candidate(weight, train_activations, valid_activations, bits,
                                     codebook=True, codebook_tensor=codebook)
     relative, channel = qt._params.scale, qt._params.s_channel
     rotated = convrot_weights(weight.float(), convrot_groupsize)
-    train_rot = convrot_inputs(train, convrot_groupsize)
-    valid_rot = convrot_inputs(valid, convrot_groupsize)
+    if prepared is None:
+        train_rot, valid_rot, upper_blocks = prepare_calibration(
+            train, valid, hessian_block, damp, convrot_groupsize)
+    else:
+        train_rot, valid_rot, upper_blocks = prepared
     codes, decoded = gptq_codes(rotated, train_rot, relative, channel,
-                                codebook, hessian_block=hessian_block, damp=damp)
+                                codebook, hessian_block=hessian_block, damp=damp,
+                                upper_blocks=upper_blocks)
     metrics = _error_metrics(rotated, decoded, valid_rot)
     packed = _pack_codes(codes, bits)
     native = {
