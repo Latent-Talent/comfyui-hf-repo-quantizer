@@ -23,6 +23,8 @@ class HFRepoQuantizer:
             "max_memory": ("STRING", {"default": "512M"}),
             "device": (("auto", "cuda", "cpu"), {"default": "auto"}),
             "keep_source": ("BOOLEAN", {"default": True}),
+            "include_restored_mtp": ("BOOLEAN", {"default": False}),
+            "mtp_source": ("STRING", {"default": "", "tooltip": "Optional restored MTP safetensors filename in the HF repo or an existing local file path. Leave empty to auto-detect model-mtp-restored.safetensors."}),
             "overwrite": ("BOOLEAN", {"default": False}),
         }}
 
@@ -35,7 +37,7 @@ class HFRepoQuantizer:
                    "only returns the most recently completed checkpoint path.")
 
     def lookup(self, model_source, format, revision, output_name, max_memory,
-               device, keep_source, overwrite):
+               device, keep_source, include_restored_mtp=False, mtp_source="", overwrite=False):
         from .service import last_output
         return (last_output(model_source, format) or "",)
 
