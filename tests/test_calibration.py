@@ -135,6 +135,18 @@ class GPTQMathTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(decoded).all())
         self.assertTrue(torch.isfinite(maths._inverse_cholesky(x[:, :16])).all())
 
+    def test_int8_activation_outliers_are_measured(self):
+        import torch
+        x = torch.ones(8, 16)
+        x[:, 0] = 50.0
+        qx = maths.dynamic_int8_activation(x)
+        self.assertEqual(tuple(qx.shape), tuple(x.shape))
+        w = torch.eye(16)
+        scored = maths._error_metrics(w, w, x)
+        self.assertGreater(scored["activation_outlier_ratio_max"], 40)
+        self.assertGreater(scored["output_relative_rmse"], 0)
+        self.assertEqual(scored["weight_only_output_relative_rmse"], 0)
+
     def test_report_metrics_zero_for_identical_candidate(self):
         import torch
         torch.manual_seed(4)
@@ -142,7 +154,9 @@ class GPTQMathTests(unittest.TestCase):
         x = torch.randn(12, 32)
         m = maths._error_metrics(w, w, x)
         self.assertEqual(m["weight_relative_rmse"], 0)
-        self.assertEqual(m["output_relative_rmse"], 0)
+        self.assertEqual(m["weight_only_output_relative_rmse"], 0)
+        self.assertGreaterEqual(m["output_relative_rmse"], 0)
+        self.assertGreater(m["activation_only_output_relative_rmse"], 0)
 
 
 if __name__ == "__main__":
