@@ -22,7 +22,8 @@ import sys
 import tempfile
 import time
 
-LOWBIT_FORMATS = {"w3a8": "w3a8_int8", "w5a8": "nested_w4a8_int8"}
+LOWBIT_FORMATS = {"w3a8": "w3a8_int8", "w5a8": "nested_w4a8_int8",
+                  "adaptive-w3w4": "mixed_native_w3w4"}
 DTYPE_BYTES = {
     "BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1,
     "I16": 2, "U16": 2, "F16": 2, "BF16": 2,
@@ -111,8 +112,10 @@ def probe() -> dict:
     except OSError as exc:
         return {"formats": [], "error": str(exc)}
     has_w3 = bool(re.search(r'QUANT_ALGOS\[\s*["\x27]w3a8_int8', qtext))
+    has_w4 = bool(re.search(r'QUANT_ALGOS\[\s*["\x27]asym_w4a8_int8', qtext))
     has_w5 = bool(re.search(r'QUANT_ALGOS\[\s*["\x27]nested_w4a8_int8', qtext))
     has_w3 = has_w3 and '"w3a8_int8"' in otext
+    has_w4 = has_w4 and '"asym_w4a8_int8"' in otext
     has_w5 = has_w5 and '"nested_w4a8_int8"' in otext and 'weight_lsb_tier' in otext
     if not has_w3 and not has_w5:
         return {"formats": [], "error": "Installed ComfyUI does not register the W3A8/W5A8 checkpoint formats."}
@@ -134,6 +137,8 @@ def probe() -> dict:
             result.append("w3a8")
         if has_w5 and nested_w4a8_codebook().numel() == 56 and callable(pack_w4a8_mma_weight):
             result.append("w5a8")
+        if has_w3 and has_w4 and default_w4a8_codebook(4).numel() == 16:
+            result.append("adaptive-w3w4")
         return {"formats": result}
     except (Exception) as exc:
         return {"formats": [], "error": f"Kitchen probe failed: {type(exc).__name__}: {exc}"}
