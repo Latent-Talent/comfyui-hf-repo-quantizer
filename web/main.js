@@ -39,7 +39,13 @@ function attach(node) {
             const payload = Object.fromEntries(
                 ["model_source", "output_type", "format", "revision", "output_name",
                  "max_memory", "convrot_mode", "device", "keep_source",
-                 "include_restored_mtp", "mtp_source", "overwrite"]
+                 "include_restored_mtp", "mtp_source", "overwrite",
+                 "calibration_mode", "calibration_dataset", "activation_dir",
+                 "calibration_examples", "train_tokens_per_layer",
+                 "holdout_tokens_per_layer", "sequence_length", "calibration_seed",
+                 "hessian_block", "hessian_damping", "max_output_rmse",
+                 "w4_extra_ratio", "calibration_quality_gate",
+                 "capture_gpu_memory_gib", "capture_cpu_memory_gib"]
                     .map(name => [name, widgetValue(node, name)])
             );
             const result = await request("/start", payload);
@@ -75,6 +81,8 @@ function attach(node) {
     mtpSummary.options = { ...(mtpSummary.options || {}), readonly: true };
     const h3Summary = node.addWidget("text", "H3 TE validation", "Not selected", () => {}, { serialize: false });
     h3Summary.options = { ...(h3Summary.options || {}), readonly: true };
+    const calSummary = node.addWidget("text", "Calibration report", "Not calibrated", () => {}, { serialize: false });
+    calSummary.options = { ...(calSummary.options || {}), readonly: true };
     buttonWidget(node, "Show log in console", async () => {
         try {
             const record = await request("/status");
@@ -106,6 +114,14 @@ function attach(node) {
                         " | Vision: " + (r.vision_deepstack ? "yes" : "no") +
                         " | Matrices: " + (r.language_linears ?? "?");
                 }
+                if (record.calibration_report) {
+                    calSummary.value = record.calibration_report;
+                } else if (record.activation_report) {
+                    const r = record.activation_report;
+                    calSummary.value = "Captured " + (r.examples_seen ?? "?") +
+                        " examples; train " + (r.train_examples ?? "?") +
+                        "; holdout " + (r.holdout_examples ?? "?");
+                }
                 node.setDirtyCanvas(true, true);
                 if (["complete", "failed", "cancelled"].includes(record.state)) {
                     if (record.state === "complete") {
@@ -128,7 +144,7 @@ function attach(node) {
         disposed = true;
         existingRemoved?.apply(this, args);
     };
-    node.setSize([Math.max(node.size?.[0] || 0, 430), Math.max(node.size?.[1] || 0, 490)]);
+    node.setSize([Math.max(node.size?.[0] || 0, 430), Math.max(node.size?.[1] || 0, 520)]);
 }
 
 app.registerExtension({
