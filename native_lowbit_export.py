@@ -39,7 +39,29 @@ QWEN_LINEAR = re.compile(
     r"linear_attn\.(?:in_proj_qkv|in_proj_z|out_proj)|"
     r"mlp\.(?:gate_proj|up_proj|down_proj))\.weight$"
 )
-CHUNK_ROWS = 128
+MAX_ROWS_PER_CHUNK = 128
+
+
+def _memory_bytes(value: str) -> int:
+    match = re.fullmatch(r"([1-9][0-9]*)([KMG])", str(value).upper())
+    if not match:
+        raise ValueError("max_memory must be like 512M or 2G")
+    bytes_ = int(match.group(1)) * 1024 ** {"K": 1, "M": 2, "G": 3}[match.group(2)]
+    if bytes_ < 16 * 1024**2:
+        raise ValueError("W3/W5 exporter needs at least 16M of working memory")
+    return bytes_
+
+
+def _chunk_rows(n: int, k: int, fmt: str, budget: int) -> int:
+    # Quantization temporarily holds FP32 rotated weights, grouped scales,
+    # assignments, and packed bytes. Budget for roughly 32 bytes per element,
+    # with at least 16 aligned rows for nested W5 packing.
+    rows = min(MAX_ROWS_PER_CHUNK, max(16, budget // max(1, 32 * k)))
+    rows = (rows // 16) * 16
+    if rows < 16:
+        raise ValueError("Memory budget too small for 16 rows")
+    return min(rows, n)
+
 
 
 def _repo_runtime_files() -> tuple[Path, Path]:
@@ -216,7 +238,7 @@ def _write_tensor(spool, name: str, tensor) -> dict:
                 path=None, start=start, size=len(payload))
 
 
-def _quantize_one(reader, name: str, shape: list[int], fmt: str, device, spool):
+def _quantize_one(reader, name: str, shape: list[int], fmt: str, device, spool, budget: int):
     import torch
     from comfy_kitchen.tensor import QuantizedTensor
     from comfy_kitchen.tensor.w4a8_packed import (
@@ -227,8 +249,9 @@ def _quantize_one(reader, name: str, shape: list[int], fmt: str, device, spool):
     # Only canonical layer weights are quantized. Keep embeddings, final heads,
     # norms, recurrent controls and vision at source precision.
     parts: dict[str, list] = {}
-    for lo in range(0, n, CHUNK_ROWS):
-        hi = min(lo + CHUNK_ROWS, n)
+    rows = _chunk_rows(n, k, fmt, budget)
+    for lo in range(0, n, rows):
+        hi = min(lo + rows, n)
         w = reader.get_slice(name)[lo:hi].to(device=device)
         qt = QuantizedTensor.from_float(
             w, "AsymW4A8Int8Layout", bits=3 if fmt == "w3a8" else 5,
@@ -340,6 +363,7 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
         raise ValueError(f"Unavailable device: {device}")
+    budget = _memory_bytes(max_memory)
     refs, metadata = _source_refs(source)
     targeted = [k for k, value in refs.items() if _eligible(value, fmt)]
     if not targeted:
@@ -360,7 +384,7 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
             for shard, keys in by_file.items():
                 with safe_open(shard, framework="pt", device="cpu") as reader:
                     for key in keys:
-                        created = _quantize_one(reader, key, refs[key]["shape"], fmt, device, spool)
+                        created = _quantize_one(reader, key, refs[key]["shape"], fmt, device, spool, budget)
                         for out_key, record in created.items():
                             if out_key in refs and out_key != key:
                                 raise ValueError(f"Generated key conflicts with source: {out_key}")
