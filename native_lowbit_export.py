@@ -65,24 +65,51 @@ def _chunk_rows(n: int, k: int, fmt: str, budget: int) -> int:
 
 
 def _repo_runtime_files() -> tuple[Path, Path]:
+    """Resolve the live ComfyUI checkout, not the converter script's path.
+
+    Python sets sys.path[0] to the directory containing this exporter script.
+    That directory is a custom node, so 'comfy' may not be discoverable from a
+    standalone subprocess even though it is installed and running.
+    """
+    candidates = []
+    root = os.environ.get("COMFYUI_ROOT")
+    if root:
+        candidates.append(Path(root).expanduser().resolve())
+    # Covers normal custom_nodes/<name>/ layouts when probing from the CLI.
+    candidates.append(Path(__file__).resolve().parents[2])
+    candidates.append(Path.cwd())
     try:
         spec = importlib.util.find_spec("comfy")
+        if spec is not None and spec.submodule_search_locations:
+            candidates.extend(Path(p).resolve().parent for p in spec.submodule_search_locations)
     except (ImportError, AttributeError, ValueError):
-        spec = None
-    if spec is None or not spec.submodule_search_locations:
-        return Path("/nonexistent/quant_ops.py"), Path("/nonexistent/ops.py")
-    directory = Path(next(iter(spec.submodule_search_locations)))
-    return directory / "quant_ops.py", directory / "ops.py"
+        pass
+    for candidate in candidates:
+        directory = candidate / "comfy"
+        quant_ops = directory / "quant_ops.py"
+        ops = directory / "ops.py"
+        if quant_ops.is_file() and ops.is_file():
+            # Makes ComfyUI itself importable to Kitchen's Python code in the
+            # exact same interpreter used for the converter worker.
+            candidate_text = str(candidate)
+            if candidate_text not in sys.path:
+                sys.path.insert(0, candidate_text)
+            return quant_ops, ops
+    raise FileNotFoundError(
+        "ComfyUI quantization loader source was not found. "
+        "Checked COMFYUI_ROOT, custom_nodes parent, cwd and Python imports. "
+        "Set COMFYUI_ROOT to your ComfyUI checkout or run through the custom node."
+    )
 
 
 def probe() -> dict:
     """Detect an actual patched *loader* and Kitchen quantizer/packer."""
-    qpath, opath = _repo_runtime_files()
     try:
+        qpath, opath = _repo_runtime_files()
         qtext = qpath.read_text(encoding="utf-8")
         otext = opath.read_text(encoding="utf-8")
-    except OSError:
-        return {"formats": [], "error": "ComfyUI native quantized loader source not found."}
+    except OSError as exc:
+        return {"formats": [], "error": str(exc)}
     has_w3 = bool(re.search(r'QUANT_ALGOS\[\s*["\x27]w3a8_int8', qtext))
     has_w5 = bool(re.search(r'QUANT_ALGOS\[\s*["\x27]nested_w4a8_int8', qtext))
     has_w3 = has_w3 and '"w3a8_int8"' in otext
