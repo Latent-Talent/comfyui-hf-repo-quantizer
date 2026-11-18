@@ -99,6 +99,26 @@ class RestoredMTPTests(unittest.TestCase):
         self.assertEqual(raw_tensor(self.output, "mtp.layers.0.self_attn.q_proj.weight"), self.c)
         self.assertEqual(raw_tensor(self.output, "mtp.norm.weight"), self.b)
 
+    def test_restored_float_removes_old_mtp_quant_metadata(self):
+        checkpoint(self.restored, {
+            "mtp.fc.weight": ("F32", [1, 2], self.c),
+        })
+        checkpoint(self.converted, {
+            "mtp.fc.weight": ("I8", [1, 2], b"\x01\x02"),
+            "mtp.fc.comfy_quant": ("U8", [2], b"{}"),
+            "mtp.fc.weight_scale": ("F32", [1], struct.pack("<f", 0.1)),
+            "mtp.norm.weight": ("F32", [2], self.b),
+            "model.layers.0.mlp.up_proj.weight": ("I8", [8], b"NON-MTP!"),
+        })
+        report = mtp.apply_restored_mtp(
+            self.source, self.converted, self.restored, self.output)
+        self.assertEqual(report["stripped_mtp_quant_tensors"], 2)
+        refs, _ = native._tensor_header(self.output)
+        self.assertEqual(refs["mtp.fc.weight"]["dtype"], "F32")
+        self.assertEqual(raw_tensor(self.output, "mtp.fc.weight"), self.c)
+        self.assertNotIn("mtp.fc.comfy_quant", refs)
+        self.assertNotIn("mtp.fc.weight_scale", refs)
+
     def test_mismatched_shapes_stop_before_publish(self):
         checkpoint(self.restored, {
             "mtp.fc.weight": ("F32", [2], self.c),
