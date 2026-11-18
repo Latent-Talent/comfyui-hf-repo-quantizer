@@ -16,6 +16,20 @@ spec.loader.exec_module(lowbit)
 
 
 class LayoutTests(unittest.TestCase):
+    def test_comfyui_root_from_environment_even_when_not_importable(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "comfy").mkdir()
+            for name in ("quant_ops.py", "ops.py"):
+                (root / "comfy" / name).write_text("# fixture loader\\n")
+            with patch.dict(os.environ, {"COMFYUI_ROOT": str(root)}):
+                with patch.object(lowbit.importlib.util, "find_spec", return_value=None):
+                    qpath, opath = lowbit._repo_runtime_files()
+            self.assertEqual(qpath, root / "comfy" / "quant_ops.py")
+            self.assertEqual(opath, root / "comfy" / "ops.py")
+
     def test_memory_budget(self):
         self.assertEqual(lowbit._memory_bytes("512M"), 512 * 1024**2)
         self.assertEqual(lowbit._memory_bytes("2G"), 2 * 1024**3)
