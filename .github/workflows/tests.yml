@@ -10,12 +10,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check Python syntax
-        run: python -m compileall -q __init__.py service.py native_lowbit_export.py h3_te.py mtp_tools.py tests/
-      - name: Run unit tests
+      - name: Python syntax (all backend modules)
+        run: python -m compileall -q __init__.py service.py native_lowbit_export.py h3_te.py mtp_tools.py tensor_inventory.py activation_capture.py calibration_math.py calibration_plan.py tests/
+      - name: Unit tests
         run: python -m unittest discover -s tests -v
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Check frontend syntax
+      - name: Frontend syntax
         run: node --check web/main.js
+  numerical:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install CPU torch for numerical calibration checks
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Test Hessian optimizer, INT8 activation quantization and precision planner
+        run: python -m unittest discover -s tests -p 'test_calibration.py' -v
