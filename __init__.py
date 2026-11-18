@@ -15,12 +15,14 @@ class HFRepoQuantizer:
     def INPUT_TYPES(cls):
         return {"required": {
             "model_source": ("STRING", {"default": "https://huggingface.co/DavidAU/Qwen3.8-27B-Ultimate-Heretic-Uncensored"}),
+            "output_type": (("native_llm", "minimax_h3_te"), {"default": "native_llm", "tooltip": "minimax_h3_te extracts Qwen3-VL-32B language layers 0-49, embeddings and vision DeepStack for the MiniMax H3 conditioning encoder."}),
             "format": (("w4a8", "w3a8", "w5a8", "w6a8", "int8-convrot",
                         "int8", "mixed", "w4a4", "fp8-e4m3", "fp8-e5m2",
                         "bf16", "fp16", "nvfp4", "mxfp8"), {"default": "w4a8"}),
             "revision": ("STRING", {"default": "main"}),
             "output_name": ("STRING", {"default": ""}),
             "max_memory": ("STRING", {"default": "512M"}),
+            "convrot_mode": (("auto", "enabled", "disabled"), {"default": "auto", "tooltip": "Auto uses each format's native behavior; Enabled upgrades INT8 to INT8 ConvRot (or enables INT8 ConvRot candidates in mixed mode). Packed W3/W4/W5/W6 formats always include native ConvRot; Disabled is refused for them."}),
             "device": (("auto", "cuda", "cpu"), {"default": "auto"}),
             "keep_source": ("BOOLEAN", {"default": True}),
             "include_restored_mtp": ("BOOLEAN", {"default": False}),
@@ -37,9 +39,10 @@ class HFRepoQuantizer:
                    "only returns the most recently completed checkpoint path.")
 
     def lookup(self, model_source, format, revision, output_name, max_memory,
-               device, keep_source, include_restored_mtp=False, mtp_source="", overwrite=False):
+               device, keep_source, include_restored_mtp=False, mtp_source="", overwrite=False,
+               output_type="native_llm", convrot_mode="auto"):
         from .service import last_output
-        return (last_output(model_source, format) or "",)
+        return (last_output(model_source, format, output_type, convrot_mode) or "",)
 
 
 NODE_CLASS_MAPPINGS["LatentTalentHFRepoQuantizer"] = HFRepoQuantizer
