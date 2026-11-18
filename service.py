@@ -47,6 +47,7 @@ _processes: dict[str, subprocess.Popen] = {}
 
 
 _LOWBIT_SCRIPT = str(Path(__file__).with_name("native_lowbit_export.py"))
+_CAPTURE_SCRIPT = str(Path(__file__).with_name("activation_capture.py"))
 
 
 def _comfyui_root() -> Path:
@@ -533,6 +534,81 @@ def _read_event_progress(job_id: str, event_file: Path):
         pass
 
 
+def _run_activation_capture(source_path: Path, output_dir: Path, cfg: dict,
+                            job_id: str, cancel_event: threading.Event):
+    """Run HF activation collection in its own process, with cancellation."""
+    from .calibration_plan import read_manifest
+    if source_path.is_file():
+        raise ValueError("Capture requires an original Hugging Face model directory "
+                         "with config.json, tokenizer and model safetensors.")
+    output_dir.mkdir(parents=True, exist_ok=False)
+    cmd = [sys.executable, _CAPTURE_SCRIPT, "--model", str(source_path),
+           "--dataset", str(Path(cfg["calibration_dataset"]).expanduser()),
+           "--output", str(output_dir),
+           "--seed", str(cfg["calibration_seed"]),
+           "--max-examples", str(cfg["calibration_examples"]),
+           "--train-tokens", str(cfg["train_tokens"]),
+           "--val-tokens", str(cfg["holdout_tokens"]),
+           "--sequence-length", str(cfg["sequence_length"]),
+           "--gpu-memory-gib", str(cfg["capture_gpu_memory_gib"]),
+           "--cpu-memory-gib", str(cfg["capture_cpu_memory_gib"])]
+    _set(job_id, state="calibrating", progress=0.48,
+         message="Capturing real layer activations with HF model offload")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, env=_lowbit_env())
+    with _mutex:
+        _processes[job_id] = proc
+    q: queue.Queue[str] = queue.Queue()
+    def consume():
+        try:
+            for line in proc.stdout:
+                q.put(line)
+        finally:
+            proc.stdout.close()
+    thread = threading.Thread(target=consume, daemon=True)
+    thread.start()
+    while proc.poll() is None:
+        if cancel_event.is_set():
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise InterruptedError("Calibration activation capture cancelled.")
+        while not q.empty():
+            line = q.get_nowait().strip()
+            if line:
+                _log(job_id, line)
+                try:
+                    record = json.loads(line)
+                except (ValueError, TypeError):
+                    record = {}
+                if record.get("event") == "capture":
+                    done, total = record.get("done", 0), record.get("total", 1)
+                    _set(job_id, state="calibrating",
+                         progress=0.48 + 0.015 * done / max(1, total),
+                         message=f"Capturing activations: {done}/{total} examples")
+        time.sleep(0.3)
+    thread.join(timeout=1)
+    while not q.empty():
+        _log(job_id, q.get_nowait())
+    with _mutex:
+        _processes.pop(job_id, None)
+    if cancel_event.is_set():
+        raise InterruptedError("Calibration capture cancelled.")
+    if proc.returncode:
+        logs = "\n".join(status(job_id).get("log", [])[-9:])
+        raise RuntimeError(f"Activation capture failed (exit {proc.returncode}).\n{logs}")
+    report = read_manifest(output_dir)
+    _log(job_id, f"Captured {len(report['activation_files'])} layer activations; "
+                 f"dataset examples {report['examples_seen']}; "
+                 f"train tokens {report['token_counts'].get('train')}; "
+                 f"holdout tokens {report['token_counts'].get('holdout')}")
+    _set(job_id, activation_report={
+        k:v for k,v in report.items() if k != "activation_files"})
+    return output_dir
+
+
 def _run_converter(source_path: Path, output: Path, cfg: dict, job_id: str,
                    cancel_event: threading.Event):
     _set(job_id, state="converting", progress=0.55, message="Starting native quantizer")
@@ -543,6 +619,18 @@ def _run_converter(source_path: Path, output: Path, cfg: dict, job_id: str,
                "--output", str(output), "--format", cfg["format"],
                "--device", cfg["device"], "--max-memory", cfg["max_memory"],
                "--events-jsonl", str(event_file)]
+        if cfg.get("calibration_mode", "off") != "off":
+            report_file = Path(cfg.get("calibration_report_path") or
+                               str(output.with_suffix(".calibration.json")))
+            cmd += ["--calibration-dir", str(cfg["resolved_activation_dir"]),
+                    "--calibration-report", str(report_file),
+                    "--max-relative-rmse", str(cfg["max_output_rmse"]),
+                    "--max-w4-extra-ratio", str(cfg["w4_extra_ratio"]),
+                    "--hessian-block", str(cfg["hessian_block"]),
+                    "--damping", str(cfg["hessian_damping"]),
+                    "--seed", str(cfg["calibration_seed"])]
+            if not cfg["calibration_quality_gate"]:
+                cmd += ["--no-quality-gate"]
     else:
         cmd = _converter_command("--no-config", str(source_path), "--format", cfg["format"],
                                  "--components", "text_encoder", "--device", cfg["device"],
