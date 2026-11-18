@@ -100,6 +100,20 @@ class SourceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     module._effective_format(fmt, mode)
 
+    def test_h3_preparation_blocks_second_job(self):
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": ["w3a8"]
+        }):
+            prior = module._running_id
+            module._jobs["preparing-fixture"] = {"state": "preparing"}
+            module._running_id = "preparing-fixture"
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already running"):
+                    module.start_job({"model_source": "org/model", "format": "w3a8"})
+            finally:
+                module._running_id = prior
+                module._jobs.pop("preparing-fixture", None)
+
     def test_h3_preflight_options_and_mtp_exclusion(self):
         with patch.object(module, "capabilities", return_value={
             "installed": True, "formats": list(module.FORMATS)
