@@ -209,10 +209,21 @@ def _check_options(payload: dict) -> dict:
         name = name[:-12]
     if name and not NAME_RE.fullmatch(name):
         raise ValueError("Output name must be a simple filename, not a path.")
+    mtp_source = str(payload.get("mtp_source", "") or "").strip()
+    if "\x00" in mtp_source:
+        raise ValueError("Invalid MTP source path.")
+    if mtp_source and not Path(mtp_source).expanduser().is_file():
+        if (mtp_source.startswith("/") or any(part in ("", ".", "..")
+                                               for part in mtp_source.split("/"))
+                or not mtp_source.lower().endswith(".safetensors")):
+            raise ValueError("MTP source must be an existing local safetensors file "
+                             "or a safetensors filename in the selected HF repository.")
     return dict(source=source, source_text=src, format=fmt, device=device,
                 max_memory=mem, output_name=name,
                 keep_source=payload.get("keep_source", True) is True,
-                overwrite=payload.get("overwrite", False) is True)
+                overwrite=payload.get("overwrite", False) is True,
+                include_restored_mtp=payload.get("include_restored_mtp", False) is True,
+                mtp_source=mtp_source)
 
 
 def last_output(model_source: str, fmt: str) -> str | None:
