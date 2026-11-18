@@ -83,6 +83,63 @@ class SourceTests(unittest.TestCase):
                     self.assertEqual(module._lowbit_probe()["formats"], ["w3a8"])
             self.assertEqual(called.call_args.kwargs["env"]["COMFYUI_ROOT"], str(root))
 
+    def test_restored_mtp_option_off_by_default(self):
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": ["w4a8", "w3a8"]
+        }):
+            cfg = module._check_options({"model_source": "a/model", "format": "w3a8"})
+        self.assertFalse(cfg["include_restored_mtp"])
+        self.assertEqual(cfg["mtp_source"], "")
+
+    def test_restored_mtp_enabled_for_any_output_format(self):
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": ["w4a8", "w3a8"]
+        }):
+            for fmt in ("w3a8", "w4a8"):
+                cfg = module._check_options({
+                    "model_source": "a/model", "format": fmt,
+                    "include_restored_mtp": True,
+                    "mtp_source": "model-mtp-restored.safetensors"
+                })
+                self.assertTrue(cfg["include_restored_mtp"])
+                self.assertEqual(cfg["mtp_source"], "model-mtp-restored.safetensors")
+
+    def test_select_restored_sidecar_prefers_explicit_restored_file(self):
+        found = module._select_restored_mtp_file({
+            "model-mtp.safetensors",
+            "model-mtp-restored.safetensors",
+            "model-00012-of-00012.safetensors"
+        })
+        self.assertEqual(found, "model-mtp-restored.safetensors")
+
+    def test_select_restored_sidecar_fails_when_missing_or_ambiguous(self):
+        with self.assertRaises(FileNotFoundError):
+            module._select_restored_mtp_file({"model-00012-of-00012.safetensors"})
+        with self.assertRaisesRegex(ValueError, "More than one"):
+            module._select_restored_mtp_file({"mtp-v1.safetensors", "mtp-v2.safetensors"})
+
+    def test_local_mtp_explicit_path_and_auto_discovery(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            folder = pathlib.Path(temp)
+            source = folder / "model.safetensors"
+            sidecar = folder / "model-mtp-restored.safetensors"
+            source.write_bytes(b"test")
+            sidecar.write_bytes(b"test")
+            self.assertEqual(module._resolve_local_mtp(source, ""), sidecar)
+            self.assertEqual(module._resolve_local_mtp(source, str(sidecar)), sidecar)
+
+    def test_reject_mtp_path_traversal(self):
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": ["w3a8"]
+        }):
+            with self.assertRaisesRegex(ValueError, "MTP source"):
+                module._check_options({
+                    "model_source": "a/model", "format": "w3a8",
+                    "include_restored_mtp": True,
+                    "mtp_source": "../other.safetensors"
+                })
+
     def test_preflight_rejects_missing_w3_exporter(self):
         with patch.object(module, "capabilities", return_value={
             "installed": True, "formats": ["w4a8", "w6a8"]
