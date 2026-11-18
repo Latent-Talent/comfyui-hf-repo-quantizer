@@ -16,6 +16,53 @@ Restart ComfyUI. Add **text → Model Management → HF Repo → Native LLM Quan
 
 A compatible native quantization runtime is also required to *load and run* the resulting checkpoints. The converter's ability to serialize a format does not prove your installed ComfyUI can execute it. The native W4A8 format is called `asym_w4a8_int8` in ComfyUI.
 
+## MiniMax H3 TE output
+
+Set **Output type = minimax_h3_te** to convert a compatible full
+Qwen3-VL-32B model (including llmfan46/Qwen3-VL-32B-Instruct-ultra-uncensored-heretic)
+into a MiniMax H3 text-and-vision conditioning checkpoint.
+
+The dedicated exporter checks the original 5120-dimensional Qwen3-VL-32B
+structure, retains language layers 0 through 49 and the full vision tower
+(DeepStack included), and strips layers 50-63, LM head and final norm. Names
+are rewritten to the native MiniMax H3 ComfyUI format.
+
+Selected tensors are streamed into a temporary safetensors staging file,
+then the chosen native quantization format is applied (W3A8, W5A8, INT8,
+INT8 ConvRot, etc.). The result is structurally checked for exactly 50
+language layers, embeddings and vision components. W3A8 and W5A8 keep
+vision and embeddings at source precision.
+
+Output filename defaults to:
+    <source>_minimax_h3_te_<format>.safetensors
+
+Place/choose the output in ComfyUI/models/text_encoders and load it with
+CLIPLoader, type: minimax. This is a conditioning-only checkpoint and is
+NOT a standalone chat/text-generation model. **Restored MTP must be disabled**
+for H3, because it discards the generation tail and does not use MTP.
+
+**Disk planning:** The downloaded complete source, temporary unquantized
+50-layer H3 checkpoint (tens of GiB), and final converted file may coexist.
+Temporary stages are deleted after conversion, errors and cancellations.
+Verify H3 encoding and quality locally; structural tests do not prove
+the quality of the altered model's conditioning.
+
+### ConvRot option
+
+The separate ConvRot mode option defaults to Auto:
+
+| Selected format | Enabled | Disabled |
+|---|---|---|
+| INT8 | Uses INT8 ConvRot | Uses ordinary INT8 |
+| INT8 ConvRot | Keeps ConvRot | Switches to ordinary INT8 |
+| Mixed | Enables INT8 ConvRot candidate layers | Refused: other mixed formats still rotate |
+| W3A8, W4A8, W5A8, W6A8, W4A4 | Already includes native ConvRot; no double rotation | Refused: required by packed format |
+| FP8, BF16, FP16, NVFP4, MXFP8 | Refused: no ConvRot support | Uses standard format |
+
+Auto preserves the original format behavior. Enabled INT8 and Enabled
+Mixed pass the appropriate format/flag to the installed native quantizer.
+The output name reflects the effective format.
+
 ## Optional restored MTP weights
 
 Some Hugging Face repositories include a separate restored MTP checkpoint
@@ -97,6 +144,7 @@ Your installed patched ComfyUI and Kitchen branches must register these native f
 - `service.py`: HF repository parsing, capability probing, download, conversion routing, status/cancellation and ComfyUI API
 - `native_lowbit_export.py`: built-in sharded W3A8/W5A8 conversion and native safetensors serialization
 - `mtp_tools.py`: comparison and optional restored MTP overlay for every format
+- `h3_te.py`: extract, rename and validate 50-layer MiniMax H3 conditioning text encoder
 - `web/main.js`: in-node progress and controls
 - `tests/test_service.py`, `tests/test_lowbit.py`, `tests/test_mtp.py`: input, format, MTP and checkpoint safety tests
 
