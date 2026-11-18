@@ -526,9 +526,12 @@ def _worker(job_id: str, cfg: dict):
         output_dir = models_dir / "text_encoders"
         output_dir.mkdir(parents=True, exist_ok=True)
         source = cfg["source"]
+        restored_mtp_path = None
         if source["kind"] == "local":
             source_path = Path(source["path"])
             stem = source_path.stem if source_path.is_file() else source_path.name
+            if cfg["include_restored_mtp"]:
+                restored_mtp_path = _resolve_local_mtp(source_path, cfg["mtp_source"])
         else:
             repo = source["repo_id"]
             # Do not put arbitrary HF URL text in filesystem components.
@@ -536,7 +539,9 @@ def _worker(job_id: str, cfg: dict):
             revslug = re.sub(r"[^A-Za-z0-9_.-]", "_", source["revision"])[:40]
             destination = models_dir / "hf_repo_quantizer_sources" / slug / revslug
             destination.mkdir(parents=True, exist_ok=True)
-            source_path = _download_hf(source, destination, job_id, evt)
+            source_path, restored_mtp_path = _download_hf(
+                source, destination, job_id, evt,
+                cfg["include_restored_mtp"], cfg["mtp_source"])
             stem = repo.split("/")[-1]
         _raise_if_cancelled(evt)
         stem = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:85].strip("._") or "model"
@@ -546,7 +551,29 @@ def _worker(job_id: str, cfg: dict):
             raise FileExistsError(f"{output.name} already exists. Choose a different name or enable overwrite.")
         _log(job_id, f"Source: {source_path}")
         _log(job_id, f"Output: {output}")
-        _run_converter(source_path, output, cfg, job_id, evt)
+        stage = None
+        if cfg["include_restored_mtp"]:
+            from .mtp_tools import inspect_mtp, apply_restored_mtp
+            if restored_mtp_path is None:
+                raise FileNotFoundError("Could not locate the separate restored MTP file.")
+            _set(job_id, message="Inspecting MTP tensor names, shapes and bytes")
+            report, _ = inspect_mtp(source_path, restored_mtp_path)
+            _set(job_id, mtp_report=report)
+            _log(job_id, "MTP inspection: " + json.dumps(report))
+            stage = output.with_name(output.stem + ".mtp-stage-" + job_id[:12] + ".safetensors")
+        try:
+            _run_converter(source_path, stage or output, cfg, job_id, evt)
+            _raise_if_cancelled(evt)
+            if stage is not None:
+                _set(job_id, state="validating", progress=0.96,
+                     message="Merging restored MTP into native checkpoint")
+                report = apply_restored_mtp(source_path, stage, restored_mtp_path,
+                                            output, overwrite=cfg["overwrite"])
+                _set(job_id, mtp_report=report)
+                _log(job_id, "MTP applied: " + json.dumps(report))
+        finally:
+            if stage is not None and stage.exists():
+                stage.unlink()
         if not cfg["keep_source"] and destination is not None:
             shutil.rmtree(destination)
         _set(job_id, state="complete", progress=1.0, output=str(output),
