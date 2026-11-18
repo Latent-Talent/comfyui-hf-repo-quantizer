@@ -166,10 +166,17 @@ def _shards(path: Path) -> list[Path]:
         if any(not p.is_relative_to(path.resolve()) or not p.is_file() for p in files):
             raise FileNotFoundError("Indexed shard is missing or outside the model directory.")
         return files
-    choices = sorted(path.glob("*.safetensors"))
-    if len(choices) != 1:
-        raise ValueError("Expected model.safetensors.index.json or one safetensors file.")
-    return choices
+    choices = sorted(p for p in path.glob("*.safetensors") if p.is_file())
+    # A local single-file checkpoint can coexist with a restored-MTP sidecar
+    # without requiring an artificial HF shard index.
+    main = [p for p in choices if not (
+        "mtp" in p.stem.lower() and
+        ("restor" in p.stem.lower() or p.stem.lower() in ("mtp", "model-mtp"))
+    )]
+    if len(main) != 1:
+        raise ValueError("Expected model.safetensors.index.json or one unambiguous "
+                         "model safetensors file (restored MTP sidecars are ignored).")
+    return main
 
 
 def _tensor_header(path: Path):
