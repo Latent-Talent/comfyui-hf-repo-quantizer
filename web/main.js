@@ -38,7 +38,8 @@ function attach(node) {
         try {
             const payload = Object.fromEntries(
                 ["model_source", "format", "revision", "output_name", "max_memory",
-                 "device", "keep_source", "overwrite"].map(name => [name, widgetValue(node, name)])
+                 "device", "keep_source", "include_restored_mtp",
+                 "mtp_source", "overwrite"].map(name => [name, widgetValue(node, name)])
             );
             const result = await request("/start", payload);
             currentJob = result.id;
@@ -69,6 +70,8 @@ function attach(node) {
     status.options = { ...(status.options || {}), readonly: true };
     const details = node.addWidget("text", "Details", "", () => {}, { serialize: false });
     details.options = { ...(details.options || {}), readonly: true };
+    const mtpSummary = node.addWidget("text", "MTP comparison", "Not inspected", () => {}, { serialize: false });
+    mtpSummary.options = { ...(mtpSummary.options || {}), readonly: true };
     buttonWidget(node, "Show log in console", async () => {
         try {
             const record = await request("/status");
@@ -87,6 +90,13 @@ function attach(node) {
                 status.value = (record.state || "unknown") + " · " +
                     Math.round((record.progress || 0) * 100) + "%";
                 details.value = (record.message || "").slice(0, 240);
+                if (record.mtp_report) {
+                    const r = record.mtp_report;
+                    mtpSummary.value = "Restored: " + (r.restored_count ?? 0) +
+                        " | Different: " + (r.different_count ?? 0) +
+                        " | Same: " + (r.identical_count ?? 0) +
+                        " | New: " + (r.new_count ?? 0);
+                }
                 node.setDirtyCanvas(true, true);
                 if (["complete", "failed", "cancelled"].includes(record.state)) {
                     if (record.state === "complete") {
