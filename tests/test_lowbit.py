@@ -51,6 +51,15 @@ class LayoutTests(unittest.TestCase):
             self.assertFalse(lowbit._eligible({**good, "name": name}, "w3a8"))
         self.assertFalse(lowbit._eligible({**good, "shape": [17, 512]}, "w5a8"))
 
+    def test_single_model_plus_mtp_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            main = folder / "model.safetensors"
+            sidecar = folder / "model-mtp-restored.safetensors"
+            main.write_bytes(b"some model")
+            sidecar.write_bytes(b"some restored head")
+            self.assertEqual(lowbit._shards(folder), [main])
+
     def test_shard_index_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
