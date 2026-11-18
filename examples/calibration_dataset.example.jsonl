@@ -1,0 +1,20 @@
+{"category":"coding","text":"Write a Python 3.12 function that streams JSONL from a large file and validates each record without loading the file into memory. Include unit tests."}
+{"category":"coding","text":"Review a Rust asynchronous WebSocket collector for reconnect races, missing sequence numbers and resource leaks, and explain safe changes."}
+{"category":"coding","text":"Explain the differences between a Python generator, iterator and async generator, with an example for each."}
+{"category":"coding","text":"Create a bash script that monitors process memory and saves timestamped CPU and GPU statistics to CSV."}
+{"category":"coding","text":"Design an integration test for a REST API that streams multiple order-book pairs and verifies exactly-once event IDs."}
+{"category":"prompt_enhancement","text":"Enhance this image prompt without changing the subject: portrait of an old coastal lighthouse at dusk, fog, distant ships, natural reflections."}
+{"category":"prompt_enhancement","text":"Turn this short video idea into a detailed 8-second shot description: mechanical clock gears turning as morning sunlight enters a workshop."}
+{"category":"prompt_enhancement","text":"Rewrite the following prompt to improve composition, color and camera direction while preserving the action: cyclist crosses a rainy street."}
+{"category":"prompt_enhancement","text":"Write a concise negative prompt to minimize duplicated hands and distorted text in a studio product photo."}
+{"category":"prompt_enhancement","text":"Describe a smooth cinematic camera movement from an establishing view of an empty station to a close-up of a flickering timetable."}
+{"category":"reasoning","text":"A warehouse fulfills 140 orders per hour for five hours, then operates at 80 percent speed for two hours. Calculate total orders with steps."}
+{"category":"reasoning","text":"Explain when using a median is preferable to a mean for positively skewed delivery-time distributions."}
+{"category":"reasoning","text":"Compare two designs for a multi-producer consumer queue where order must be preserved per customer but not globally."}
+{"category":"reasoning","text":"A system has 5 independent workers, each with a 0.02 probability of failure per day. What is the probability at least one fails? State assumptions."}
+{"category":"conversation","text":"Explain why a 34-inch curved monitor can feel more immersive than a flat panel and what matters most for text clarity."}
+{"category":"conversation","text":"Summarize the main considerations when buying secondhand clothing for online resale."}
+{"category":"conversation","text":"Explain the benefits and drawbacks of a WireGuard VPN for accessing a home server over the internet."}
+{"category":"structured","text":"Return only valid JSON describing a product with fields title, category, condition, price_usd, and attributes, using reasonable example values."}
+{"category":"structured","text":"Provide a JSON object for a software incident with keys severity, incident_id, summary, impact, timeline and mitigation; no markdown."}
+{"category":"structured","text":"Convert these order status updates into a JSON array with strictly ascending timestamps and fields id, status, timestamp: 12:03 packed id3; 12:04 shipped id3."}
