@@ -45,9 +45,13 @@ def fixture():
         "model.language_model.layers.50.self_attn.q_proj.weight":
             ([2], tiny),
     }
+    matrix = bytes(2 * h3.HIDDEN * 4)
     for layer in range(h3.LAYERS):
         for suffix in h3.REQUIRED_LINEARS:
-            data[f"model.language_model.layers.{layer}.{suffix}"] = ([2], tiny)
+            shape = ([2, h3.HIDDEN] if suffix not in
+                     ("self_attn.o_proj.weight", "mlp.down_proj.weight")
+                     else [h3.HIDDEN, 2])
+            data[f"model.language_model.layers.{layer}.{suffix}"] = (shape, matrix)
     return data
 
 
@@ -124,6 +128,16 @@ class H3Tests(unittest.TestCase):
             data.pop("model.language_model.layers.21.mlp.down_proj.weight")
             checkpoint(source, data)
             with self.assertRaisesRegex(ValueError, "Missing required"):
+                h3.plan_h3(source)
+
+    def test_reject_incompatible_layer_projection_shape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "full.safetensors"
+            data = fixture()
+            data["model.language_model.layers.3.mlp.up_proj.weight"] = (
+                [2, 2560], bytes(2 * 2560 * 4))
+            checkpoint(source, data)
+            with self.assertRaisesRegex(ValueError, "projection shape"):
                 h3.plan_h3(source)
 
     def test_reject_incorrect_hidden_dimension(self):
