@@ -83,6 +83,60 @@ class SourceTests(unittest.TestCase):
                     self.assertEqual(module._lowbit_probe()["formats"], ["w3a8"])
             self.assertEqual(called.call_args.kwargs["env"]["COMFYUI_ROOT"], str(root))
 
+    def test_convrot_format_policy(self):
+        self.assertEqual(module._effective_format("int8", "enabled"), ("int8-convrot", False))
+        self.assertEqual(module._effective_format("int8-convrot", "disabled"), ("int8", False))
+        self.assertEqual(module._effective_format("w3a8", "enabled"), ("w3a8", False))
+        self.assertEqual(module._effective_format("w5a8", "auto"), ("w5a8", False))
+        self.assertEqual(module._effective_format("mixed", "enabled"), ("mixed", True))
+        self.assertEqual(module._effective_format("mixed", "auto"), ("mixed", False))
+
+    def test_convrot_rejects_incompatible_requests(self):
+        for fmt, mode in [("w3a8", "disabled"), ("w4a8", "disabled"),
+                          ("w5a8", "disabled"), ("w6a8", "disabled"),
+                          ("w4a4", "disabled"), ("bf16", "enabled"),
+                          ("fp8-e4m3", "enabled"), ("mixed", "disabled")]:
+            with self.subTest(fmt=fmt, mode=mode):
+                with self.assertRaises(ValueError):
+                    module._effective_format(fmt, mode)
+
+    def test_h3_preflight_options_and_mtp_exclusion(self):
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": list(module.FORMATS)
+        }):
+            cfg = module._check_options({
+                "model_source": "llmfan46/Qwen3-VL-32B-Instruct-ultra-uncensored-heretic",
+                "output_type": "minimax_h3_te", "format": "w3a8",
+                "convrot_mode": "enabled",
+            })
+            self.assertEqual(cfg["output_type"], "minimax_h3_te")
+            self.assertEqual(cfg["format"], "w3a8")
+            self.assertFalse(cfg["include_restored_mtp"])
+            with self.assertRaisesRegex(ValueError, "does not use MTP"):
+                module._check_options({
+                    "model_source": "org/model", "output_type": "minimax_h3_te",
+                    "format": "w3a8", "include_restored_mtp": True,
+                })
+
+    def test_enabled_convrot_resolves_int8_and_checks_exporter(self):
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": ["int8"]
+        }):
+            with self.assertRaisesRegex(ValueError, "INT8-CONVROT exporter unavailable"):
+                module._check_options({
+                    "model_source": "org/model", "format": "int8",
+                    "convrot_mode": "enabled",
+                })
+        with patch.object(module, "capabilities", return_value={
+            "installed": True, "formats": ["int8", "int8-convrot"]
+        }):
+            cfg = module._check_options({
+                "model_source": "org/model", "format": "int8",
+                "convrot_mode": "enabled",
+            })
+            self.assertEqual(cfg["format"], "int8-convrot")
+            self.assertEqual(cfg["requested_format"], "int8")
+
     def test_restored_mtp_option_off_by_default(self):
         with patch.object(module, "capabilities", return_value={
             "installed": True, "formats": ["w4a8", "w3a8"]
