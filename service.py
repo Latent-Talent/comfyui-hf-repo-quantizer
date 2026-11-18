@@ -42,16 +42,54 @@ _processes: dict[str, subprocess.Popen] = {}
 _LOWBIT_SCRIPT = str(Path(__file__).with_name("native_lowbit_export.py"))
 
 
+def _comfyui_root() -> Path:
+    """Locate the running ComfyUI checkout, independent of process CWD.
+
+    ComfyUI's folder_paths module lives in its root. It is already loaded by
+    ComfyUI, but unit tests and unusual launchers can use the custom-node path.
+    """
+    candidates = []
+    try:
+        import folder_paths
+        if getattr(folder_paths, "__file__", None):
+            candidates.append(Path(folder_paths.__file__).resolve().parent)
+    except ImportError:
+        pass
+    candidates.extend((Path(__file__).resolve().parents[2], Path.cwd()))
+    for candidate in candidates:
+        if (candidate / "comfy" / "quant_ops.py").is_file() and (
+            candidate / "comfy" / "ops.py"
+        ).is_file():
+            return candidate
+    raise RuntimeError(
+        "Unable to locate ComfyUI installation. Checked folder_paths, "
+        "the custom_nodes parent and the current working directory."
+    )
+
+
+def _lowbit_env() -> dict[str, str]:
+    """Make the ComfyUI package importable by detached worker interpreters."""
+    env = os.environ.copy()
+    root = str(_comfyui_root())
+    env["COMFYUI_ROOT"] = root
+    # Python normally starts a script with its own directory as sys.path[0].
+    # Include the ComfyUI root so imports in Kitchen and optional model code work.
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, existing)))
+    return env
+
+
 def _lowbit_probe() -> dict:
     """Probe native loader and Kitchen export APIs in the ComfyUI interpreter."""
     try:
         p = subprocess.run([sys.executable, _LOWBIT_SCRIPT, "--probe"],
-                           capture_output=True, text=True, timeout=25)
+                           capture_output=True, text=True, timeout=25,
+                           env=_lowbit_env())
         if p.returncode:
             return {"formats": [], "error": (p.stderr or p.stdout).strip()[-400:]}
         result = json.loads(p.stdout)
         return result if isinstance(result, dict) else {"formats": []}
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         return {"formats": [], "error": str(exc)[:400]}
 
 
@@ -362,7 +400,7 @@ def _run_converter(source_path: Path, output: Path, cfg: dict, job_id: str,
         cmd += ["--resume"]
     # The subprocess uses the same Python interpreter as ComfyUI.
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
+                            text=True, bufsize=1, env=_lowbit_env() if cfg["format"] in EXPERIMENTAL_FORMATS else None)
     with _mutex:
         _processes[job_id] = proc
     lines: queue.Queue[str] = queue.Queue()
