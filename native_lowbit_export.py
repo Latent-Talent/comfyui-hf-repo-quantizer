@@ -550,6 +550,14 @@ def main(argv=None):
     parser.add_argument("--format", choices=sorted(LOWBIT_FORMATS))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--max-memory", default="512M")
+    parser.add_argument("--calibration-dir", type=Path)
+    parser.add_argument("--calibration-report", type=Path)
+    parser.add_argument("--max-relative-rmse", type=float, default=0.20)
+    parser.add_argument("--max-w4-extra-ratio", type=float, default=0.25)
+    parser.add_argument("--hessian-block", type=int, default=128)
+    parser.add_argument("--damping", type=float, default=0.05)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-quality-gate", action="store_true")
     parser.add_argument("--events-jsonl", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
@@ -561,7 +569,13 @@ def main(argv=None):
     try:
         print(json.dumps(export(args.model, args.output, args.format,
                                 args.device, args.events_jsonl, args.overwrite,
-                                args.max_memory)), flush=True)
+                                args.max_memory, calibration_dir=args.calibration_dir,
+                                calibration_report=args.calibration_report,
+                                max_relative_rmse=args.max_relative_rmse,
+                                max_w4_extra_ratio=args.max_w4_extra_ratio,
+                                hessian_block=args.hessian_block, damping=args.damping,
+                                quality_gate=not args.no_quality_gate,
+                                seed=args.seed)), flush=True)
         return 0
     except Exception as e:
         print(f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
