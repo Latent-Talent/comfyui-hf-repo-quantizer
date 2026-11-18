@@ -170,10 +170,31 @@ def apply_restored_mtp(original: Path, converted: Path, restored: Path,
     if missing:
         raise ValueError(f"Converted checkpoint dropped {len(missing)} original MTP tensors: {missing[:4]}")
     final_refs = dict(converted_refs)
+    stripped_metadata = set()
+    # An upstream quantizer may have quantized MTP weights too. Restoring a
+    # floating-point weight must remove that module's old quant configuration
+    # and quantized-weight scales; otherwise ComfyUI will decode a float as
+    # if it were packed integer storage.
+    quant_suffixes = (
+        "comfy_quant", "weight_scale", "weight_scale_2", "weight_s_rel",
+        "weight_s_channel", "weight_codebook", "weight_lsb_tier",
+        "weight_correction", "input_scale", "pre_quant_scale",
+    )
+    for key in overlays:
+        if not key.endswith(".weight"):
+            continue
+        prefix = key[:-len("weight")]
+        for suffix in quant_suffixes:
+            related = prefix + suffix
+            if related in final_refs:
+                stripped_metadata.add(related)
+    for key in stripped_metadata:
+        del final_refs[key]
     final_refs.update(overlays)
     report.update({
         "output_mtp_count": sum(canonical_mtp(k) is not None for k in final_refs),
         "applied_count": len(overlays),
+        "stripped_mtp_quant_tensors": len(stripped_metadata),
     })
     # A single header rewrite and raw copy preserves every unrelated quantized
     # payload, including format-specific tensor layouts and metadata.
