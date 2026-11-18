@@ -1,0 +1,5 @@
+# Optional dependencies for automatic activation capture from HF model weights.
+# Use the same Python environment as ComfyUI; Torch and safetensors should already be installed.
+transformers>=4.57
+accelerate>=1.0
+safetensors>=0.4.3
