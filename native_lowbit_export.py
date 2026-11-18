@@ -251,6 +251,18 @@ def _source_refs(source: Path):
     return merged, metadata
 
 
+def _eligible_targets(refs: dict, fmt: str) -> list[str]:
+    """Respect deliberate FP32 tensors in otherwise reduced-precision sources.
+
+    A mixed BF16/F32 model often stores sensitive components in F32. An
+    all-F32 source is not assumed to be vendor precision policy.
+    """
+    has_reduced_float = any(r["dtype"] in ("F16", "BF16") for r in refs.values())
+    return [name for name, ref in refs.items()
+            if _eligible(ref, fmt) and
+            not (has_reduced_float and ref["dtype"] == "F32")]
+
+
 def _eligible(ref: dict, fmt: str) -> bool:
     if not QWEN_LINEAR.fullmatch(ref["name"]):
         return False
@@ -443,8 +455,7 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
         raise ValueError(f"Unavailable device: {device}")
     budget = _memory_bytes(max_memory)
     refs, metadata = _source_refs(source)
-    targeted = [k for k, value in refs.items()
-                if _eligible(value, "w5a8" if fmt == "w5a8" else "w3a8")]
+    targeted = _eligible_targets(refs, "w5a8" if fmt == "w5a8" else "w3a8")
     if not targeted:
         raise ValueError("No supported linear weights found for this format and architecture.")
     target_set = set(targeted)
@@ -466,7 +477,7 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
             max_relative_rmse=max_relative_rmse,
             max_w4_extra_ratio=max_w4_extra_ratio,
             hessian_block=hessian_block, damping=damping, seed=seed,
-            event_callback=calibration_progress)
+            event_callback=calibration_progress, eligible_override=targeted)
         manifest = read_manifest(Path(calibration_dir))
         measured = report["per_layer"]
         if set(measured) != set(targeted):
