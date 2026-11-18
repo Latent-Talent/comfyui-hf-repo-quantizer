@@ -50,6 +50,39 @@ class SourceTests(unittest.TestCase):
         ):
             self.assertEqual(module.parse_source("/existing/path")["kind"], "local")
 
+    def test_lowbit_worker_receives_comfyui_root_and_pythonpath(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "comfy").mkdir()
+            (root / "comfy" / "quant_ops.py").write_text("# test")
+            (root / "comfy" / "ops.py").write_text("# test")
+            fake_folder_paths = types.SimpleNamespace(__file__=str(root / "folder_paths.py"))
+            with patch.dict(sys.modules, {"folder_paths": fake_folder_paths}):
+                self.assertEqual(module._comfyui_root(), root)
+                env = module._lowbit_env()
+            self.assertEqual(env["COMFYUI_ROOT"], str(root))
+            self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(root))
+
+    def test_probe_passes_root_to_child_process(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "comfy").mkdir()
+            for name in ("quant_ops.py", "ops.py"):
+                (root / "comfy" / name).write_text("# test")
+            fake_folder_paths = types.SimpleNamespace(__file__=str(root / "folder_paths.py"))
+            mock_result = types.SimpleNamespace(returncode=0, stdout='{"formats":["w3a8"]}', stderr="")
+            with patch.dict(sys.modules, {"folder_paths": fake_folder_paths}):
+                with patch.object(module.subprocess, "run", return_value=mock_result) as called:
+                    self.assertEqual(module._lowbit_probe()["formats"], ["w3a8"])
+            self.assertEqual(called.call_args.kwargs["env"]["COMFYUI_ROOT"], str(root))
+
     def test_preflight_rejects_missing_w3_exporter(self):
         with patch.object(module, "capabilities", return_value={
             "installed": True, "formats": ["w4a8", "w6a8"]
