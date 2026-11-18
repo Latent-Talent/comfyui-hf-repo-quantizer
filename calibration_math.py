@@ -1,10 +1,10 @@
 """Activation-aware GPTQ-style code optimization for ConvRot W3A8/W4A8.
 
-This is a block-diagonal Hessian GPTQ update on the *actual inference grid*:
+This is a block-diagonal Hessian GPTQ update on the *Kitchen weight grid*:
 Kitchen's fixed codebook, rounded INT8 level, FP8 group scale, FP32 channel
 scale and ConvRot rotation. The optimizer changes integer assignments, not
-the runtime serialization format. It does not optimize INT8 activation scales
-(they remain dynamically quantized by Comfy Kitchen).
+the runtime serialization format. Held-out scoring simulates dynamically
+quantized INT8 activations, but does not replace full-model evaluation.
 
 Importing this module does not import Torch until calibration is requested.
 """
@@ -115,26 +115,55 @@ def gptq_codes(rotated_weight, train_rot, scale_rel, scale_channel,
     return codes, decoded
 
 
+def dynamic_int8_activation(x):
+    """Simulate Kitchen's per-token dynamic INT8 activation quantization.
+
+    This is a reference approximation of the deployed INT8 path; it is used
+    for calibration ranking, never to infer exact kernel numerical behavior.
+    """
+    torch = _torch()
+    x = x.float()
+    scales = (x.abs().amax(dim=-1, keepdim=True) / 127.0).clamp(min=1e-9)
+    codes = (x / scales).round().clamp_(-127, 127)
+    return codes * scales
+
+
 def _error_metrics(wrot, qrot, valid_rot):
-    """Relative reconstruction and held-out linear output RMSE."""
+    """Held-out W+A8 output error and separate weight/activation diagnostics.
+
+    Selector uses actual held-out activations after dynamic INT8 simulation.
+    Weight L2 is an *anomaly guard*, never the ranking criterion.
+    """
     torch = _torch()
     w = wrot.float()
     q = qrot.float()
     x = valid_rot.float()
-    # accumulate per group of rows to cap the peak temp allocation
-    total_weight = total_werr = total_output = total_oerr = 0.0
+    qx = dynamic_int8_activation(x)
+    total_weight = total_werr = total_output = 0.0
+    total_combined = total_weight_out = total_activation_out = 0.0
     for start in range(0, w.shape[0], 128):
         wr, qr = w[start:start+128], q[start:start+128]
-        total_werr += float((wr-qr).square().sum().item())
+        total_werr += float((wr - qr).square().sum().item())
         total_weight += float(wr.square().sum().item())
-        out = x @ wr.T
-        delta = x @ (wr-qr).T
-        total_oerr += float(delta.square().sum().item())
-        total_output += float(out.square().sum().item())
+        reference = x @ wr.T
+        combined = qx @ qr.T
+        w_only = x @ qr.T
+        a_only = qx @ wr.T
+        total_combined += float((reference - combined).square().sum().item())
+        total_weight_out += float((reference - w_only).square().sum().item())
+        total_activation_out += float((reference - a_only).square().sum().item())
+        total_output += float(reference.square().sum().item())
+    abs_x = x.abs()
+    token_median = abs_x.median(dim=-1).values.clamp(min=1e-7)
+    outlier_ratios = abs_x.amax(dim=-1) / token_median
     return {
-        "weight_relative_rmse": math.sqrt(total_werr/max(total_weight, 1e-12)),
-        "output_relative_rmse": math.sqrt(total_oerr/max(total_output, 1e-12)),
-        "holdout_output_mse": total_oerr / max(x.shape[0] * w.shape[0], 1),
+        "weight_relative_rmse": math.sqrt(total_werr / max(total_weight, 1e-12)),
+        "weight_only_output_relative_rmse": math.sqrt(total_weight_out / max(total_output, 1e-12)),
+        "activation_only_output_relative_rmse": math.sqrt(total_activation_out / max(total_output, 1e-12)),
+        "output_relative_rmse": math.sqrt(total_combined / max(total_output, 1e-12)),
+        "holdout_output_mse": total_combined / max(x.shape[0] * w.shape[0], 1),
+        "activation_outlier_ratio_median": float(outlier_ratios.median().item()),
+        "activation_outlier_ratio_max": float(outlier_ratios.amax().item()),
     }
 
 
