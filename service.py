@@ -20,15 +20,16 @@ import time
 import uuid
 from urllib.parse import unquote, urlsplit
 
-FORMATS = ("w4a8", "w3a8", "w5a8", "w6a8", "int8-convrot", "int8",
+FORMATS = ("w4a8", "w3a8", "adaptive-w3w4", "w5a8", "w6a8", "int8-convrot", "int8",
            "mixed", "w4a4", "fp8-e4m3", "fp8-e5m2", "bf16", "fp16",
            "nvfp4", "mxfp8")
-EXPERIMENTAL_FORMATS = {"w3a8", "w5a8"}
+EXPERIMENTAL_FORMATS = {"w3a8", "w5a8", "adaptive-w3w4"}
 RESUMABLE_FORMATS = {"w4a8", "w6a8", "mixed"}
 OUTPUT_TYPES = ("native_llm", "minimax_h3_te")
 CONVROT_MODES = ("auto", "enabled", "disabled")
-INHERENT_CONVROT = {"w3a8", "w4a8", "w5a8", "w6a8", "w4a4"}
+INHERENT_CONVROT = {"w3a8", "adaptive-w3w4", "w4a8", "w5a8", "w6a8", "w4a4"}
 NO_CONVROT = {"bf16", "fp16", "fp8-e4m3", "fp8-e5m2", "nvfp4", "mxfp8"}
+CALIBRATION_MODES = ("off", "capture", "existing")
 REPO_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
 MEMORY_RE = re.compile(r"^[1-9]\d*(?:[KMG])$", re.I)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
