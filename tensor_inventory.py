@@ -44,6 +44,8 @@ def build_inventory(refs: dict, selected: dict[str, str], source: str = "") -> d
     if unknown:
         raise ValueError(f"Precision plan refers to absent tensors: {sorted(unknown)[:3]}")
     entries = {}
+    mixed_precision_source = any(ref["dtype"] in ("F16", "BF16")
+                                 for ref in refs.values())
     role_counts, counts, saved_bytes = {}, {}, 0
     for key in sorted(refs):
         ref = refs[key]
@@ -51,6 +53,11 @@ def build_inventory(refs: dict, selected: dict[str, str], source: str = "") -> d
         decision = selected.get(key, "keep_source_dtype")
         if decision != "keep_source_dtype" and role != "linear_or_other_matrix":
             raise ValueError(f"Protected {role} tensor cannot be down-quantized: {key}")
+        if mixed_precision_source and ref["dtype"] == "F32":
+            if decision != "keep_source_dtype":
+                raise ValueError(f"Source FP32 was deliberately retained in a mixed-precision "
+                                 f"checkpoint; refused to quantize {key}")
+            guard = "source_F32_preserved_in_mixed_precision_model"
         if decision not in ("keep_source_dtype", "w3a8", "w4a8", "w5a8"):
             raise ValueError(f"Unsupported per-tensor precision: {decision}")
         role_counts[role] = role_counts.get(role, 0) + 1
@@ -73,6 +80,7 @@ def build_inventory(refs: dict, selected: dict[str, str], source: str = "") -> d
         "selection_basis": "architecture_allowlist_then_holdout_activation_output_error",
         "weight_reconstruction_is_selector": False,
         "preserve_source_dtype_for_unselected_tensors": True,
+        "mixed_precision_source_F32_guard": mixed_precision_source,
         "tensors": entries,
     }
 
