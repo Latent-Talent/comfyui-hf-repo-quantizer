@@ -37,9 +37,10 @@ function attach(node) {
         node.setDirtyCanvas(true, true);
         try {
             const payload = Object.fromEntries(
-                ["model_source", "format", "revision", "output_name", "max_memory",
-                 "device", "keep_source", "include_restored_mtp",
-                 "mtp_source", "overwrite"].map(name => [name, widgetValue(node, name)])
+                ["model_source", "output_type", "format", "revision", "output_name",
+                 "max_memory", "convrot_mode", "device", "keep_source",
+                 "include_restored_mtp", "mtp_source", "overwrite"]
+                    .map(name => [name, widgetValue(node, name)])
             );
             const result = await request("/start", payload);
             currentJob = result.id;
@@ -72,6 +73,8 @@ function attach(node) {
     details.options = { ...(details.options || {}), readonly: true };
     const mtpSummary = node.addWidget("text", "MTP comparison", "Not inspected", () => {}, { serialize: false });
     mtpSummary.options = { ...(mtpSummary.options || {}), readonly: true };
+    const h3Summary = node.addWidget("text", "H3 TE validation", "Not selected", () => {}, { serialize: false });
+    h3Summary.options = { ...(h3Summary.options || {}), readonly: true };
     buttonWidget(node, "Show log in console", async () => {
         try {
             const record = await request("/status");
@@ -97,6 +100,12 @@ function attach(node) {
                         " | Same: " + (r.identical_count ?? 0) +
                         " | New: " + (r.new_count ?? 0);
                 }
+                if (record.h3_report) {
+                    const r = record.h3_report;
+                    h3Summary.value = "Layers: " + (r.language_layers ?? "?") +
+                        " | Vision: " + (r.vision_deepstack ? "yes" : "no") +
+                        " | Matrices: " + (r.language_linears ?? "?");
+                }
                 node.setDirtyCanvas(true, true);
                 if (["complete", "failed", "cancelled"].includes(record.state)) {
                     if (record.state === "complete") {
@@ -119,7 +128,7 @@ function attach(node) {
         disposed = true;
         existingRemoved?.apply(this, args);
     };
-    node.setSize([Math.max(node.size?.[0] || 0, 395), Math.max(node.size?.[1] || 0, 440)]);
+    node.setSize([Math.max(node.size?.[0] || 0, 430), Math.max(node.size?.[1] || 0, 490)]);
 }
 
 app.registerExtension({
