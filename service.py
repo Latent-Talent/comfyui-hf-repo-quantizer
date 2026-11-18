@@ -351,7 +351,7 @@ def start_job(payload: dict) -> dict:
     global _running_id
     cfg = _check_options(payload)  # preflight BEFORE downloading
     with _mutex:
-        if _running_id and _jobs[_running_id]["state"] in ("queued", "downloading", "preparing", "converting", "validating"):
+        if _running_id and _jobs[_running_id]["state"] in ("queued", "downloading", "calibrating", "preparing", "converting", "validating"):
             raise RuntimeError("A model conversion is already running.")
         job_id = uuid.uuid4().hex
         _jobs[job_id] = dict(id=job_id, state="queued", message="Queued",
@@ -731,6 +731,24 @@ def _worker(job_id: str, cfg: dict):
             raise FileExistsError(f"{output.name} already exists. Choose a different name or enable overwrite.")
         _log(job_id, f"Source: {source_path}")
         _log(job_id, f"Output: {output}")
+        if cfg["calibration_mode"] == "existing":
+            from .calibration_plan import read_manifest
+            active_dir = Path(cfg["activation_dir"]).expanduser().resolve()
+            manifest = read_manifest(active_dir)
+            _set(job_id, activation_report={
+                k:v for k,v in manifest.items() if k != "activation_files"})
+            cfg["resolved_activation_dir"] = str(active_dir)
+            _log(job_id, f"Using captured activations: {active_dir}")
+        elif cfg["calibration_mode"] == "capture":
+            from .calibration_plan import read_manifest
+            calibration_root = models_dir / "hf_repo_quantizer_calibration"
+            calibration_dir = calibration_root / (stem[:48] + "-" + job_id[:12])
+            active_dir = _run_activation_capture(
+                source_path, calibration_dir, cfg, job_id, evt)
+            cfg["resolved_activation_dir"] = str(active_dir)
+        if cfg["calibration_mode"] != "off":
+            cfg["calibration_report_path"] = str(output.with_suffix(".calibration.json"))
+            _set(job_id, calibration_report=cfg["calibration_report_path"])
         stage = None
         if cfg["include_restored_mtp"]:
             from .mtp_tools import inspect_mtp, apply_restored_mtp
