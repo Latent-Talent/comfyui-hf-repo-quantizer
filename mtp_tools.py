@@ -162,6 +162,10 @@ def apply_restored_mtp(original: Path, converted: Path, restored: Path,
         # Even if the external converter changed dtype or quantized an MTP
         # tensor, replace it with the restored FP16/BF16/F32 version.
         overlays[dest_key] = new_ref
+    # Prevent a converter from silently dropping some of the original MTP head.
+    missing = sorted(set(originals) - set(incoming) - set(converted_names))
+    if missing:
+        raise ValueError(f"Converted checkpoint dropped {len(missing)} original MTP tensors: {missing[:4]}")
     final_refs = dict(converted_refs)
     final_refs.update(overlays)
     report.update({
@@ -208,10 +212,9 @@ def apply_restored_mtp(original: Path, converted: Path, restored: Path,
                     f.close()
             out.flush()
             os.fsync(out.fileno())
-        from safetensors import safe_open
-        with safe_open(temporary, framework="pt", device="cpu") as reader:
-            if set(reader.keys()) != set(final_refs):
-                raise RuntimeError("Merged checkpoint failed key verification.")
+        checked, checked_meta = _tensor_header(temporary)
+        if set(checked) != set(final_refs) or sum(x["size"] for x in checked.values()) != cursor:
+            raise RuntimeError("Merged checkpoint failed tensor header verification.")
         if output.exists() and not overwrite:
             raise FileExistsError(f"Output already exists: {output}")
         os.replace(temporary, output)
