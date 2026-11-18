@@ -79,7 +79,7 @@ def plan_h3(source: Path) -> tuple[dict, dict]:
         if ref["dtype"] not in FLOAT_DTYPES:
             raise ValueError(f"MiniMax H3 requires floating input weights; {key} is {ref['dtype']}")
         refs[mapped] = ref
-    summary = inspect_h3_refs(refs)
+    summary = inspect_h3_refs(refs, check_source_shapes=True)
     summary.update({"source_tensors": len(original),
                     "selected_tensors": len(refs),
                     "dropped_tensors": dropped,
@@ -87,7 +87,7 @@ def plan_h3(source: Path) -> tuple[dict, dict]:
     return refs, summary
 
 
-def inspect_h3_refs(refs: dict) -> dict:
+def inspect_h3_refs(refs: dict, check_source_shapes: bool = False) -> dict:
     names = set(refs)
     embed = refs.get("model.embed_tokens.weight")
     if embed is None or len(embed["shape"]) != 2 or embed["shape"][1] != HIDDEN:
@@ -108,6 +108,17 @@ def inspect_h3_refs(refs: dict) -> dict:
             k = f"model.layers.{i}.{suffix}"
             if k not in names:
                 raise ValueError(f"Missing required Qwen3-VL-32B layer weight: {k}")
+            if check_source_shapes:
+                shape = refs[k]["shape"]
+                if (len(shape) != 2 or any(x <= 0 for x in shape) or
+                        (suffix in ("self_attn.q_proj.weight",
+                                    "self_attn.k_proj.weight",
+                                    "self_attn.v_proj.weight",
+                                    "mlp.gate_proj.weight",
+                                    "mlp.up_proj.weight") and shape[1] != HIDDEN) or
+                        (suffix in ("self_attn.o_proj.weight",
+                                    "mlp.down_proj.weight") and shape[0] != HIDDEN)):
+                    raise ValueError(f"Incompatible Qwen3-VL-32B projection shape: {k} {shape}")
     if any(k.startswith(("lm_head.", "model.norm.", "model.language_model.norm.",
                          "model.layers.50.", "mtp.")) for k in names):
         raise ValueError("MiniMax H3 must not contain an LM head, final norm, MTP or layers >=50.")
