@@ -259,6 +259,42 @@ def _check_options(payload: dict) -> dict:
                 or not mtp_source.lower().endswith(".safetensors")):
             raise ValueError("MTP source must be an existing local safetensors file "
                              "or a safetensors filename in the selected HF repository.")
+    mode = str(payload.get("calibration_mode", "off"))
+    if mode not in CALIBRATION_MODES:
+        raise ValueError("Calibration mode must be off, capture or existing.")
+    if effective_fmt == "adaptive-w3w4" and mode == "off":
+        raise ValueError("Adaptive W3/W4 requires activation calibration; "
+                         "select Capture or Existing.")
+    if mode != "off" and effective_fmt not in ("w3a8", "adaptive-w3w4"):
+        raise ValueError("GPTQ calibration currently supports W3A8 or Adaptive W3/W4 only.")
+    dataset = str(payload.get("calibration_dataset", "") or "").strip()
+    activation_dir = str(payload.get("activation_dir", "") or "").strip()
+    if mode == "capture" and not Path(dataset).expanduser().is_file():
+        raise ValueError("Capture calibration requires an existing local JSONL "
+                         "dataset path. Use real prompts with category and/or messages.")
+    if mode == "existing" and not (Path(activation_dir).expanduser() / "manifest.json").is_file():
+        raise ValueError("Existing calibration requires an activation directory containing manifest.json.")
+    def num(name, default, smallest, largest, kind=int):
+        try:
+            value = kind(payload.get(name, default))
+        except (ValueError, TypeError):
+            raise ValueError(f"{name} is not numeric.")
+        if not smallest <= value <= largest:
+            raise ValueError(f"{name} must be between {smallest} and {largest}.")
+        return value
+    max_examples = num("calibration_examples", 1024, 8, 4096)
+    train_tokens = num("train_tokens_per_layer", 128, 16, 2048)
+    val_tokens = num("holdout_tokens_per_layer", 64, 16, 1024)
+    sequence_length = num("sequence_length", 512, 8, 4096)
+    hessian_block = num("hessian_block", 128, 16, 256)
+    if hessian_block % 16:
+        raise ValueError("Hessian block must be a multiple of 16.")
+    damping = num("hessian_damping", 0.05, 0.0001, 0.5, float)
+    max_rmse = num("max_output_rmse", 0.20, 0.001, 0.99, float)
+    extra_ratio = num("w4_extra_ratio", 0.25, 0.0, 0.40, float)
+    seed = num("calibration_seed", 42, 0, 2147483647)
+    gpu_memory_gib = num("capture_gpu_memory_gib", 20, 2, 128)
+    cpu_memory_gib = num("capture_cpu_memory_gib", 42, 4, 1024)
     return dict(source=source, source_text=src, format=effective_fmt,
                 requested_format=fmt, output_type=output_type,
                 convrot_mode=convrot_mode, mixed_int8_convrot=mixed_int8_convrot,
@@ -266,7 +302,15 @@ def _check_options(payload: dict) -> dict:
                 keep_source=payload.get("keep_source", True) is True,
                 overwrite=payload.get("overwrite", False) is True,
                 include_restored_mtp=payload.get("include_restored_mtp", False) is True,
-                mtp_source=mtp_source)
+                mtp_source=mtp_source, calibration_mode=mode,
+                calibration_dataset=dataset, activation_dir=activation_dir,
+                calibration_examples=max_examples, train_tokens=train_tokens,
+                holdout_tokens=val_tokens, sequence_length=sequence_length,
+                hessian_block=hessian_block, hessian_damping=damping,
+                max_output_rmse=max_rmse, w4_extra_ratio=extra_ratio,
+                calibration_seed=seed, capture_gpu_memory_gib=gpu_memory_gib,
+                capture_cpu_memory_gib=cpu_memory_gib,
+                calibration_quality_gate=payload.get("calibration_quality_gate", True) is True)
 
 
 def last_output(model_source: str, fmt: str,
