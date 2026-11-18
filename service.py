@@ -292,6 +292,46 @@ def _raise_if_cancelled(event: threading.Event):
         raise InterruptedError("Cancelled")
 
 
+def _select_restored_mtp_file(paths: set[str], folder: str = "",
+                              requested: str = "") -> str:
+    """Choose a separate MTP file, never a model shard."""
+    if requested:
+        if requested not in paths:
+            raise FileNotFoundError(f"MTP file not found: {requested}")
+        return requested
+    candidates = sorted(p for p in paths if p.startswith(folder)
+                        and p.endswith(".safetensors")
+                        and "mtp" in Path(p).stem.lower()
+                        and not re.fullmatch(r"model-\d+-of-\d+", Path(p).stem))
+    if not candidates:
+        raise FileNotFoundError("No separate MTP checkpoint found. Disable the restored MTP "
+                                "option or specify mtp_source.")
+    preferred = [p for p in candidates if Path(p).name.lower() == "model-mtp-restored.safetensors"]
+    if len(preferred) == 1:
+        return preferred[0]
+    restored = [p for p in candidates if "restor" in Path(p).stem.lower()]
+    if len(restored) == 1:
+        return restored[0]
+    if len(candidates) != 1:
+        raise ValueError("More than one MTP file found: " + ", ".join(candidates[:5]))
+    return candidates[0]
+
+
+def _resolve_local_mtp(source_path: Path, requested: str) -> Path:
+    root = source_path if source_path.is_dir() else source_path.parent
+    direct = Path(requested).expanduser() if requested else None
+    if direct is not None and direct.is_file():
+        selected = direct.resolve()
+    else:
+        selected_name = _select_restored_mtp_file(
+            {p.name for p in root.glob("*.safetensors") if p.is_file()},
+            requested=requested)
+        selected = (root / selected_name).resolve()
+    if selected == source_path.resolve():
+        raise ValueError("Restored MTP cannot be the main model checkpoint.")
+    return selected
+
+
 def _download_hf(source: dict, destination: Path, job_id: str, cancel_event: threading.Event) -> Path:
     try:
         from huggingface_hub import HfApi, hf_hub_download
