@@ -5,6 +5,7 @@ in a separate Python process so its GPU allocations are not held by ComfyUI.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -266,9 +268,10 @@ def _check_options(payload: dict) -> dict:
                 mtp_source=mtp_source)
 
 
-def last_output(model_source: str, fmt: str) -> str | None:
+def last_output(model_source: str, fmt: str,
+                output_type: str = "native_llm", convrot_mode: str = "auto") -> str | None:
     with _mutex:
-        return _completed.get((model_source.strip(), fmt))
+        return _completed.get((model_source.strip(), fmt, output_type, convrot_mode))
 
 
 def _set(job_id: str, **changes):
@@ -606,16 +609,41 @@ def _worker(job_id: str, cfg: dict):
             _log(job_id, "MTP inspection: " + json.dumps(report))
             stage = output.with_name(output.stem + ".mtp-stage-" + job_id[:12] + ".safetensors")
         try:
-            _run_converter(source_path, stage or output, cfg, job_id, evt)
-            _raise_if_cancelled(evt)
-            if stage is not None:
-                _set(job_id, state="validating", progress=0.96,
-                     message="Merging restored MTP into native checkpoint")
-                report = apply_restored_mtp(source_path, stage, restored_mtp_path,
-                                            output, overwrite=cfg["overwrite"],
-                                            should_cancel=evt.is_set)
-                _set(job_id, mtp_report=report)
-                _log(job_id, "MTP applied: " + json.dumps(report))
+            with contextlib.ExitStack() as scratch:
+                conversion_source = source_path
+                if cfg["output_type"] == "minimax_h3_te":
+                    from .h3_te import prepare_h3, validate_h3_output
+                    stage_dir = Path(scratch.enter_context(
+                        tempfile.TemporaryDirectory(prefix="h3-te-", dir=output_dir)))
+                    conversion_source = stage_dir / "h3_te_source.safetensors"
+                    _set(job_id, state="preparing", progress=0.50,
+                         message="Extracting first 50 Qwen3-VL language layers and vision tower")
+                    def on_h3_progress(fraction, key):
+                        _set(job_id, state="preparing",
+                             progress=min(0.54, 0.50 + 0.04 * fraction),
+                             message=f"Building H3 TE: {key[-110:]}")
+                    summary = prepare_h3(source_path, conversion_source,
+                                         should_cancel=evt.is_set,
+                                         on_progress=on_h3_progress)
+                    _set(job_id, h3_report=summary)
+                    _log(job_id, "MiniMax H3 extraction: " + json.dumps(summary))
+                _raise_if_cancelled(evt)
+                _run_converter(conversion_source, stage or output, cfg, job_id, evt)
+                _raise_if_cancelled(evt)
+                if stage is not None:
+                    _set(job_id, state="validating", progress=0.96,
+                         message="Merging restored MTP into native checkpoint")
+                    report = apply_restored_mtp(source_path, stage, restored_mtp_path,
+                                                output, overwrite=cfg["overwrite"],
+                                                should_cancel=evt.is_set)
+                    _set(job_id, mtp_report=report)
+                    _log(job_id, "MTP applied: " + json.dumps(report))
+                if cfg["output_type"] == "minimax_h3_te":
+                    _set(job_id, state="validating", progress=0.98,
+                         message="Validating 50-layer MiniMax H3 text encoder")
+                    report = validate_h3_output(output)
+                    _set(job_id, h3_report={**summary, **report})
+                    _log(job_id, "MiniMax H3 validation: " + json.dumps(report))
         finally:
             if stage is not None and stage.exists():
                 stage.unlink()
@@ -624,7 +652,8 @@ def _worker(job_id: str, cfg: dict):
         _set(job_id, state="complete", progress=1.0, output=str(output),
              message=f"Saved {output.name}")
         with _mutex:
-            _completed[(cfg["source_text"], cfg["format"])] = str(output)
+            _completed[(cfg["source_text"], cfg["requested_format"],
+                        cfg["output_type"], cfg["convrot_mode"])] = str(output)
     except InterruptedError:
         _set(job_id, state="cancelled", message="Cancelled (downloaded files may be reusable)")
     except Exception as exc:
