@@ -28,14 +28,21 @@ Default source: `https://huggingface.co/DavidAU/Qwen3.8-27B-Ultimate-Heretic-Unc
 
 ### Supported format controls
 
-The list includes W4A8, W6A8, W3A8, W5A8, INT8, INT8 ConvRot, mixed precision, W4A4, FP8, FP16/BF16, NVFP4 and MXFP8. **Not all are necessarily available.** Conversion is refused at preflight if the configured converter does not expose a requested format. In particular:
+The node now includes a **built-in W3A8 and W5A8 exporter**. This is separate
+from the external native-quantizer CLI, which still handles W4A8, W6A8, INT8,
+ConvRot, mixed, FP8, BF16/FP16, NVFP4 and MXFP8.
 
-- **W3A8:** requires a patched converter that exports `w3a8_int8` storage, and a matching ComfyUI loader. Installing the GPU kernels alone is not an exporter.
-- **W5A8:** requires a patched converter/exporter that emits `nested_w4a8_int8` with a compatible nested codebook and low-bit tier; an ordinary 5-bit packed weight is not interchangeable with it.
-- **W4A8 and W6A8:** available through supported native quantizer implementations where architecture and runtime constraints pass.
-- A checkpoint can only be converted when its tensors match an architecture supported by the converter. Unrecognized models fail explicitly rather than treating random state-dict tensors as a valid LLM checkpoint.
+- **W3A8** exports per-layer `w3a8_int8` with a packed int3 weight, FP8 relative group scales, FP32 channel scales and an 8-entry codebook.
+- **W5A8** exports `nested_w4a8_int8` with a nested 56-entry codebook, packed MMA stream, channel scales, low-bit refinement tier, and downgrade metadata.
+- For W3/W5, the exporter probes your actual installed **ComfyUI quant_ops.py and ops.py**, plus Comfy Kitchen's low-bit quantization/packing functions. This avoids the original error where only the separate CLI's `--list-formats` was checked.
+- The native low-bit exporter currently supports compatible **Qwen3.5-derived (including compatible Qwen3.8) and Qwen3** safetensors weight namespaces. Unsupported architectures fail explicitly. Tensor shapes must meet the native kernel and packing alignment requirements.
+- The exporter keeps embeddings, lm_head, norms, recurrent state coefficients, vision layers and non-targeted weights at source precision.
+- Output is validated as safetensors and published atomically. A successful save is **not** proof of native generation quality or complete model loading; test in ComfyUI.
 
-The target model must also have a compatible native ComfyUI model architecture. For example, ComfyUI's Qwen3.5-27B loader recognizes appropriate `model.language_model.*` checkpoint keys. Arbitrary Hugging Face transformers are **not** universally loadable simply by quantizing their weights.
+Your installed patched ComfyUI and Kitchen branches must register these native formats. The low-bit probe reports a targeted failure reason if a required loader or encoder is missing.
+
+**Note:** W5A8 is not a simple 5-bit packed matrix; it is a nested base representation plus an optional refinement tier, and dropping that tier is designed to downgrade precision under memory pressure.
+
 
 ### Download behavior
 
@@ -46,6 +53,7 @@ The target model must also have a compatible native ComfyUI model architecture. 
 - Runs conversion in a separate Python process so conversion allocations are released when it finishes.
 - Never silently changes requested output format.
 - Cancels the conversion process and reports errors; canceling a download takes effect between individual shard downloads.
+- The W3/W5 exporter honors the per-layer conversion working-memory setting using bounded, aligned tensor row chunks.
 - A ComfyUI server restart interrupts jobs. Existing files remain, and repeat downloads can reuse existing Hugging Face files.
 
 **Space planning:** A large unquantized model and its converted output may coexist. Ensure adequate disk space. Conversion is streaming but takes real CPU/GPU resources and disk I/O. `max_memory` is the converter's per-tensor working budget, not a total RAM/VRAM cap.
@@ -62,9 +70,10 @@ The target model must also have a compatible native ComfyUI model architecture. 
 ## Architecture
 
 - `__init__.py`: ComfyUI legacy custom-node registration and management node
-- `service.py`: HF repository parsing, preflight, download, subprocess conversion, status/cancellation and ComfyUI API
+- `service.py`: HF repository parsing, capability probing, download, conversion routing, status/cancellation and ComfyUI API
+- `native_lowbit_export.py`: built-in sharded W3A8/W5A8 conversion and native safetensors serialization
 - `web/main.js`: in-node progress and controls
-- `tests/test_service.py`: isolated input validation and mocked preflight tests
+- `tests/test_service.py` and `tests/test_lowbit.py`: input, format and checkpoint safety tests
 
 ## Test
 
