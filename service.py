@@ -332,7 +332,8 @@ def _resolve_local_mtp(source_path: Path, requested: str) -> Path:
     return selected
 
 
-def _download_hf(source: dict, destination: Path, job_id: str, cancel_event: threading.Event) -> Path:
+def _download_hf(source: dict, destination: Path, job_id: str, cancel_event: threading.Event,
+                 include_restored_mtp: bool = False, mtp_source: str = "") -> tuple[Path, Path | None]:
     try:
         from huggingface_hub import HfApi, hf_hub_download
         from huggingface_hub.utils import EntryNotFoundError
@@ -383,6 +384,20 @@ def _download_hf(source: dict, destination: Path, job_id: str, cancel_event: thr
     optional = [prefix + p for p in ("config.json", "tokenizer.json", "tokenizer_config.json",
                                      "generation_config.json", "processor_config.json",
                                      "preprocessor_config.json", "chat_template.jinja")]
+    mtp_path = None
+    if include_restored_mtp:
+        local_mtp = Path(mtp_source).expanduser() if mtp_source else None
+        if local_mtp is not None and local_mtp.is_file():
+            mtp_path = local_mtp.resolve()
+        else:
+            requested = mtp_source
+            if requested and prefix and "/" not in requested:
+                requested = prefix + requested
+            selected = _select_restored_mtp_file(set(paths), prefix, requested=requested)
+            if selected in weights:
+                raise ValueError("Restored MTP must be separate from the model shards.")
+            mtp_path = destination / selected
+            optional.append(selected)
     to_download = sorted(set(weights + [p for p in optional if p in paths]))
     expected = sum(paths.get(p, 0) for p in to_download)
     free = shutil.disk_usage(destination).free
@@ -403,9 +418,9 @@ def _download_hf(source: dict, destination: Path, job_id: str, cancel_event: thr
     _raise_if_cancelled(cancel_event)
     _log(job_id, f"Hugging Face commit: {revision}")
     if len(weights) == 1 and not manifest:
-        return destination / weights[0]
-    # Only index-listed shards are used: no accidental second model or extra MTP file.
-    return destination / prefix if subfolder else destination
+        return destination / weights[0], mtp_path
+    # Separate restored MTP is only applied after quantization.
+    return (destination / prefix if subfolder else destination), mtp_path
 
 
 def _read_event_progress(job_id: str, event_file: Path):
