@@ -421,12 +421,20 @@ def _publish(output: Path, refs: dict, source_metadata: dict, spool_path: Path,
 
 
 def export(source: Path, output: Path, fmt: str, device: str, events: Path | None,
-           overwrite: bool = False, max_memory: str = "512M") -> dict:
+           overwrite: bool = False, max_memory: str = "512M",
+           calibration_dir: Path | None = None, calibration_report: Path | None = None,
+           max_relative_rmse: float = 0.20, max_w4_extra_ratio: float = 0.25,
+           hessian_block: int = 128, damping: float = 0.05,
+           quality_gate: bool = True, seed: int = 42) -> dict:
     if fmt not in LOWBIT_FORMATS:
         raise ValueError(f"Unsupported built-in format: {fmt}")
     status = probe()
     if fmt not in status["formats"]:
         raise RuntimeError(f"{fmt} unavailable: {status.get('error', 'missing loader or exporter')}")
+    if fmt == "adaptive-w3w4" and calibration_dir is None:
+        raise ValueError("Adaptive W3/W4 needs captured activations; refusing data-free conversion.")
+    if calibration_dir is not None and fmt == "w5a8":
+        raise ValueError("Activation-aware GPTQ currently supports W3/W4, not nested W5A8.")
     import torch
     from safetensors import safe_open
     if device == "auto":
@@ -435,13 +443,58 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
         raise ValueError(f"Unavailable device: {device}")
     budget = _memory_bytes(max_memory)
     refs, metadata = _source_refs(source)
-    targeted = [k for k, value in refs.items() if _eligible(value, fmt)]
+    targeted = [k for k, value in refs.items() if _eligible(value, "w3a8")]
     if not targeted:
         raise ValueError("No supported linear weights found for this format and architecture.")
     target_set = set(targeted)
+    report = None
+    decisions = {k: fmt for k in targeted}
+    if calibration_dir is not None:
+        try:
+            from .calibration_plan import (
+                analyze_layers, read_manifest, find_activations, save_report)
+        except ImportError:
+            from calibration_plan import (
+                analyze_layers, read_manifest, find_activations, save_report)
+        _emit(events, {"event": "calibration_start", "layers": len(targeted)})
+        def calibration_progress(event):
+            _emit(events, event)
+        report = analyze_layers(
+            refs, Path(calibration_dir), device=device, max_memory=max_memory,
+            max_relative_rmse=max_relative_rmse,
+            max_w4_extra_ratio=max_w4_extra_ratio,
+            hessian_block=hessian_block, damping=damping, seed=seed,
+            event_callback=calibration_progress)
+        measured = report["per_layer"]
+        if set(measured) != set(targeted):
+            raise RuntimeError("Calibration did not measure every W3-compatible layer.")
+        if fmt == "adaptive-w3w4":
+            decisions = report["precision_plan"]["selected"]
+        else:
+            decisions = {k: "w3a8" for k in targeted}
+            report["precision_plan"]["selected"] = decisions
+            report["precision_plan"]["promoted_count"] = 0
+            report["precision_plan"]["extra_bytes_used"] = 0
+        violations = [
+            k for k in targeted
+            if measured[k]["w4" if decisions[k] == "w4a8" else "w3"][
+                "output_relative_rmse"] > max_relative_rmse
+        ]
+        report["precision_plan"]["threshold_violations"] = violations
+        report["precision_plan"]["all_layers_within_threshold"] = not violations
+        report["status"] = "quality_rejected" if quality_gate and violations else "calibrated"
+        report["selected_output_format"] = fmt
+        report["quantized_layer_count"] = len(targeted)
+        if calibration_report is not None:
+            save_report(calibration_report, report)
+        _emit(events, {"event": "calibration_complete",
+                       "promoted": report["precision_plan"]["promoted_count"],
+                       "violations": len(violations)})
+        if quality_gate and violations:
+            raise ValueError(f"Quality gate rejected calibration: {len(violations)} "
+                             "layers exceed held-out output RMSE limit. Review "
+                             f"{calibration_report} and adjust precision budget/threshold.")
     _emit(events, {"event": "start", "target_layers": len(targeted)})
-    # Spool quantized tensors to disk, not system memory; raw passthrough
-    # pointers continue to reference the original model shards.
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="hf-lowbit-", dir=output.parent) as scratch:
         staged = Path(scratch) / "converted.bin"
@@ -454,21 +507,39 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
             for shard, keys in by_file.items():
                 with safe_open(shard, framework="pt", device="cpu") as reader:
                     for key in keys:
-                        created = _quantize_one(reader, key, refs[key]["shape"], fmt, device, spool, budget)
+                        active_fmt = decisions[key]
+                        training = None
+                        if calibration_dir is not None:
+                            training = find_activations(
+                                read_manifest(Path(calibration_dir)), key,
+                                Path(calibration_dir), refs[key]["shape"][1])
+                        created, metrics = _quantize_one(
+                            reader, key, refs[key]["shape"], active_fmt, device,
+                            spool, budget, calibration=training,
+                            hessian_block=hessian_block, damping=damping)
                         for out_key, record in created.items():
                             if out_key in refs and out_key != key:
                                 raise ValueError(f"Generated key conflicts with source: {out_key}")
                             emitted[out_key] = record
                         count += 1
                         _emit(events, {"event": "layer", "done": count,
-                                       "total": len(targeted), "progress": count / len(targeted)})
+                                       "total": len(targeted),
+                                       "precision": active_fmt,
+                                       "progress": count / len(targeted)})
         final = {key: v for key, v in refs.items() if key not in target_set}
         final.update(emitted)
         _emit(events, {"event": "saving", "total_tensors": len(final)})
         _publish(output, final, metadata, staged, overwrite)
-    _emit(events, {"event": "complete", "output": str(output), "quantized_layers": len(targeted)})
+    if report is not None:
+        report["status"] = "complete"
+        report["output"] = str(output)
+        if calibration_report is not None:
+            save_report(calibration_report, report)
+    _emit(events, {"event": "complete", "output": str(output),
+                   "quantized_layers": len(targeted)})
     return {"output": str(output), "quantized_layers": len(targeted),
-            "format": fmt}
+            "format": fmt, "calibrated": calibration_dir is not None,
+            "promoted": report["precision_plan"]["promoted_count"] if report else 0}
 
 
 def main(argv=None):
