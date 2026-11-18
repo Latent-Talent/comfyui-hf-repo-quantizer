@@ -130,8 +130,14 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
     """Two candidates per projection; only bounded row chunks on CUDA."""
     import torch
     from safetensors import safe_open
-    from .native_lowbit_export import _eligible, _chunk_rows, _memory_bytes
-    from .calibration_math import calibrated_candidate, estimate_layer_bytes, combine_metrics
+    try:
+        from .native_lowbit_export import _eligible, _chunk_rows, _memory_bytes
+        from .calibration_math import (
+            calibrated_candidate, estimate_layer_bytes, combine_metrics, prepare_calibration)
+    except ImportError:
+        from native_lowbit_export import _eligible, _chunk_rows, _memory_bytes
+        from calibration_math import (
+            calibrated_candidate, estimate_layer_bytes, combine_metrics, prepare_calibration)
     manifest = read_manifest(directory)
     eligible = [key for key, ref in refs.items() if _eligible(ref, "w3a8")]
     if not eligible:
@@ -140,11 +146,18 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
     # missing module would otherwise silently get uncalibrated weight rounding.
     measured = {}
     budget = _memory_bytes(max_memory)
-    dev = torch.device("cuda" if device == "auto" and torch.cuda.is_available() else device)
+    resolved = "cuda" if device == "auto" and torch.cuda.is_available() else (
+        "cpu" if device == "auto" else device)
+    if resolved == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA requested for calibration but unavailable.")
+    dev = torch.device(resolved)
     for number, key in enumerate(eligible, 1):
         ref = refs[key]
         train, valid = find_activations(manifest, key, Path(directory), ref["shape"][1])
         chunk = _chunk_rows(*ref["shape"], "w3a8", budget)
+        with torch.no_grad():
+            prepared = prepare_calibration(train.to(dev), valid.to(dev),
+                                           hessian_block, damping)
         # every candidate is calibrated, on the same inputs, with same fixed
         # Kitchen scale grid and ConvRot transform.
         scored = {}
@@ -157,7 +170,7 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
                     with torch.no_grad():
                         _native, metrics = calibrated_candidate(
                             w, train, valid, bits, hessian_block=hessian_block,
-                            damp=damping)
+                            damp=damping, prepared=prepared)
                     stats.append((metrics, hi-lo))
                     del w, _native
                 scored[f"w{bits}"] = combine_metrics(stats)
