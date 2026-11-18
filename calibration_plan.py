@@ -126,7 +126,8 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
                    max_relative_rmse: float = 0.20,
                    max_w4_extra_ratio: float = 0.25,
                    hessian_block: int = 128, damping: float = 0.05,
-                   seed: int = 42, event_callback=None) -> dict:
+                   seed: int = 42, event_callback=None,
+                   eligible_override: list[str] | None = None) -> dict:
     """Two candidates per projection; only bounded row chunks on CUDA."""
     import torch
     from safetensors import safe_open
@@ -139,7 +140,11 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
         from calibration_math import (
             calibrated_candidate, estimate_layer_bytes, combine_metrics, prepare_calibration)
     manifest = read_manifest(directory)
-    eligible = [key for key, ref in refs.items() if _eligible(ref, "w3a8")]
+    eligible = (list(eligible_override) if eligible_override is not None
+                else [key for key, ref in refs.items() if _eligible(ref, "w3a8")])
+    for key in eligible:
+        if key not in refs or not _eligible(refs[key], "w3a8"):
+            raise ValueError(f"Invalid calibrated candidate: {key}")
     if not eligible:
         raise ValueError("No native W3A8-compatible linear layers found.")
     # Refuse partial datasets: even if all the files that exist look valid, a
@@ -187,6 +192,9 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
     selection = choose_precision(measured, max_w4_extra_ratio, max_relative_rmse)
     return {
         "method": "block_diagonal_GPTQ_ConvRot_INT8_grid",
+        "selection_metric": "held_out_W3_vs_W4_linear_output_RMSE_with_dynamic_A8_reference",
+        "weight_reconstruction_is_selector": False,
+        "activation_outliers_measured": True,
         "calibrated": True,
         "seed": seed, "hessian_block":hessian_block, "damping":damping,
         "activation_manifest": {k:v for k,v in manifest.items() if k != "activation_files"},
@@ -194,7 +202,9 @@ def analyze_layers(refs: dict, directory: Path, device: str, max_memory: str,
         "per_layer": measured,
         "quality_validation": {
             "weight_reconstruction": "measured",
-            "heldout_layer_output": "measured",
+            "heldout_layer_output": "measured_with_dynamic_int8_activation_simulation",
+            "activation_only_output_error": "measured",
+            "activation_outlier_ratio": "measured",
             "perplexity": "not_measured",
             "task_accuracy": "not_measured",
             "bf16_full_model_eval": "not_measured",
