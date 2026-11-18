@@ -508,6 +508,23 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
             raise ValueError(f"Quality gate rejected calibration: {len(violations)} "
                              "layers exceed held-out output RMSE limit. Review "
                              f"{calibration_report} and adjust precision budget/threshold.")
+    try:
+        from .tensor_inventory import build_inventory, save_inventory
+    except ImportError:
+        from tensor_inventory import build_inventory, save_inventory
+    inventory_file = output.with_suffix(".tensor-policy.json")
+    inventory = build_inventory(refs, decisions, source=str(source))
+    save_inventory(inventory_file, inventory)
+    _emit(events, {"event": "tensor_inventory",
+                   "source_tensors": inventory["source_tensor_count"],
+                   "precision_counts": inventory["precision_counts"],
+                   "report": str(inventory_file)})
+    if report is not None:
+        report["tensor_inventory_file"] = str(inventory_file)
+        report["protected_tensor_roles"] = inventory["roles"]
+        report["precision_counts"] = inventory["precision_counts"]
+        if calibration_report is not None:
+            save_report(calibration_report, report)
     _emit(events, {"event": "start", "target_layers": len(targeted)})
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="hf-lowbit-", dir=output.parent) as scratch:
