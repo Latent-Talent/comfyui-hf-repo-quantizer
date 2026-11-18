@@ -39,6 +39,22 @@ _cancel: dict[str, threading.Event] = {}
 _processes: dict[str, subprocess.Popen] = {}
 
 
+_LOWBIT_SCRIPT = str(Path(__file__).with_name("native_lowbit_export.py"))
+
+
+def _lowbit_probe() -> dict:
+    """Probe native loader and Kitchen export APIs in the ComfyUI interpreter."""
+    try:
+        p = subprocess.run([sys.executable, _LOWBIT_SCRIPT, "--probe"],
+                           capture_output=True, text=True, timeout=25)
+        if p.returncode:
+            return {"formats": [], "error": (p.stderr or p.stdout).strip()[-400:]}
+        result = json.loads(p.stdout)
+        return result if isinstance(result, dict) else {"formats": []}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return {"formats": [], "error": str(exc)[:400]}
+
+
 def parse_source(value: str, revision: str = "main") -> dict:
     """Accept HF model URL/repo ID or existing local safetensors path."""
     value = str(value or "").strip()
@@ -101,29 +117,34 @@ def _converter_command(*args: str) -> list[str]:
 
 
 def capabilities() -> dict:
-    """Report actual available converter flags, never infer them from kernels."""
+    """Probe external converter and built-in W3/W5 low-bit exporter independently."""
+    external_formats = []
+    error = None
     try:
         p = subprocess.run(_converter_command("--no-config", "--list-formats"),
                            capture_output=True, text=True, timeout=20)
         if p.returncode:
             raise RuntimeError((p.stderr or p.stdout).strip()[-500:])
-        listing = p.stdout.lower()
-        advertised = set()
-        for line in listing.splitlines()[1:]:
-            token = line.strip().split(maxsplit=1)[0] if line.strip() else ""
-            if token in FORMATS:
-                advertised.add(token)
-        # Do not assume a runtime format is exportable merely because its
-        # Comfy Kitchen kernel is present or the UI lists it.
-        supported = [f for f in FORMATS if f in advertised]
-        return {"installed": True, "formats": supported,
-                "notes": {"w3a8": "Requires a converter exporting native W3A8 and a matching ComfyUI loader.",
-                          "w5a8": "Requires a converter exporting the nested W5A8 checkpoint and matching loader."}}
+        for line in p.stdout.lower().splitlines()[1:]:
+            tokens = line.strip().split(maxsplit=1)
+            if tokens and tokens[0] in FORMATS:
+                external_formats.append(tokens[0])
     except (FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
-        return {"installed": False, "formats": [],
-                "error": "Native quantizer is unavailable. Install it in ComfyUI's Python environment: "
-                         "python -m pip install git+https://github.com/NidAll/comfyui-native-quantizer.git "
-                         f"({str(exc)[:180]})"}
+        error = str(exc)[:350]
+    internal = _lowbit_probe()
+    supported = set(external_formats) | (set(internal.get("formats", [])) & EXPERIMENTAL_FORMATS)
+    result = {"installed": bool(supported), "formats": [f for f in FORMATS if f in supported],
+              "exporters": {"external": external_formats,
+                            "native_lowbit": internal.get("formats", [])},
+              "notes": {"w3a8": "Native W3A8 requires the patched ComfyUI and Kitchen runtime.",
+                        "w5a8": "Native W5A8 requires the nested checkpoint loader and packed tier encoder."}}
+    if not supported:
+        result["error"] = ("No compatible converter detected. External converter: " +
+                           str(error or "no formats") + "; native low-bit: " +
+                           str(internal.get("error", "not available")))
+    elif internal.get("error"):
+        result["lowbit_error"] = internal["error"]
+    return result
 
 
 def _check_options(payload: dict) -> dict:
@@ -136,9 +157,9 @@ def _check_options(payload: dict) -> dict:
     if not caps["installed"]:
         raise ValueError(caps["error"])
     if fmt not in caps["formats"]:
-        raise ValueError(f"{fmt.upper()} exporter unavailable in the installed converter. "
-                         "Installed W3/W5 runtime kernels alone cannot produce a compatible checkpoint. "
-                         "Install a converter explicitly supporting this output format.")
+        reason = caps.get("lowbit_error", "Native loader or Kitchen exporter not available")
+        raise ValueError(f"{fmt.upper()} exporter unavailable: {reason}. "
+                         "Install the W3/W5-compatible ComfyUI and Comfy Kitchen branches.")
     device = str(payload.get("device", "auto"))
     if device not in ("auto", "cuda", "cpu"):
         raise ValueError("Unknown conversion device.")
@@ -324,11 +345,17 @@ def _run_converter(source_path: Path, output: Path, cfg: dict, job_id: str,
     _set(job_id, state="converting", progress=0.55, message="Starting native quantizer")
     output.parent.mkdir(parents=True, exist_ok=True)
     event_file = output.with_suffix(".quant-events.jsonl")
-    cmd = _converter_command("--no-config", str(source_path), "--format", cfg["format"],
-                             "--components", "text_encoder", "--device", cfg["device"],
-                             "--max-memory", cfg["max_memory"],
-                             "--output", str(output), "--events-jsonl", str(event_file),
-                             "--validate")
+    if cfg["format"] in EXPERIMENTAL_FORMATS:
+        cmd = [sys.executable, _LOWBIT_SCRIPT, "--model", str(source_path),
+               "--output", str(output), "--format", cfg["format"],
+               "--device", cfg["device"], "--max-memory", cfg["max_memory"],
+               "--events-jsonl", str(event_file)]
+    else:
+        cmd = _converter_command("--no-config", str(source_path), "--format", cfg["format"],
+                                 "--components", "text_encoder", "--device", cfg["device"],
+                                 "--max-memory", cfg["max_memory"],
+                                 "--output", str(output), "--events-jsonl", str(event_file),
+                                 "--validate")
     if cfg["overwrite"]:
         cmd += ["--overwrite"]
     if cfg["format"] in RESUMABLE_FORMATS:
