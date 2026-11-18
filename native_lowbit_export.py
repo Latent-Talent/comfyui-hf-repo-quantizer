@@ -443,11 +443,13 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
         raise ValueError(f"Unavailable device: {device}")
     budget = _memory_bytes(max_memory)
     refs, metadata = _source_refs(source)
-    targeted = [k for k, value in refs.items() if _eligible(value, "w3a8")]
+    targeted = [k for k, value in refs.items()
+                if _eligible(value, "w5a8" if fmt == "w5a8" else "w3a8")]
     if not targeted:
         raise ValueError("No supported linear weights found for this format and architecture.")
     target_set = set(targeted)
     report = None
+    manifest = None
     decisions = {k: fmt for k in targeted}
     if calibration_dir is not None:
         try:
@@ -465,6 +467,7 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
             max_w4_extra_ratio=max_w4_extra_ratio,
             hessian_block=hessian_block, damping=damping, seed=seed,
             event_callback=calibration_progress)
+        manifest = read_manifest(Path(calibration_dir))
         measured = report["per_layer"]
         if set(measured) != set(targeted):
             raise RuntimeError("Calibration did not measure every W3-compatible layer.")
@@ -511,7 +514,7 @@ def export(source: Path, output: Path, fmt: str, device: str, events: Path | Non
                         training = None
                         if calibration_dir is not None:
                             training = find_activations(
-                                read_manifest(Path(calibration_dir)), key,
+                                manifest, key,
                                 Path(calibration_dir), refs[key]["shape"][1])
                         created, metrics = _quantize_one(
                             reader, key, refs[key]["shape"], active_fmt, device,
