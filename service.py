@@ -305,7 +305,7 @@ def start_job(payload: dict) -> dict:
     global _running_id
     cfg = _check_options(payload)  # preflight BEFORE downloading
     with _mutex:
-        if _running_id and _jobs[_running_id]["state"] in ("queued", "downloading", "converting", "validating"):
+        if _running_id and _jobs[_running_id]["state"] in ("queued", "downloading", "preparing", "converting", "validating"):
             raise RuntimeError("A model conversion is already running.")
         job_id = uuid.uuid4().hex
         _jobs[job_id] = dict(id=job_id, state="queued", message="Queued",
