@@ -16,6 +16,30 @@ Restart ComfyUI. Add **text → Model Management → HF Repo → Native LLM Quan
 
 A compatible native quantization runtime is also required to *load and run* the resulting checkpoints. The converter's ability to serialize a format does not prove your installed ComfyUI can execute it. The native W4A8 format is called `asym_w4a8_int8` in ComfyUI.
 
+## Optional restored MTP weights
+
+Some Hugging Face repositories include a separate restored MTP checkpoint
+alongside MTP weights in the main model shards. DavidAU's Qwen3.8-27B repository
+includes **model-mtp-restored.safetensors**.
+
+- **Include Restored MTP (default off):** Preserve original MTP tensors when
+  disabled. When enabled, fetch the separate file, compare names, shapes,
+  dtypes and contents, and overlay compatible weights after conversion.
+- **MTP Source:** Leave blank to auto-detect the restored MTP sidecar in the
+  same repository/folder. Enter a repository-relative filename if ambiguous,
+  or an existing local .safetensors file path to override the source.
+- **MTP comparison:** The node reports restored, different, identical and new
+  tensor counts. Detailed records are also available in the job log.
+- **Safeguards:** Reject unexpected non-MTP tensors, duplicate normalized keys,
+  incompatible shapes and missing original MTP weights. Non-MTP converted
+  tensors are copied unchanged, including their native quantization metadata.
+- **Disk space:** The merge streams safetensors bytes and does not duplicate
+  the unquantized 55+ GB checkpoint, but temporarily holds the converted
+  checkpoint and its final MTP-merged output.
+- **Scope:** Works for W3A8, W5A8 and all other export formats the converter
+  supports. A successful save is not a guarantee of native MTP generation
+  or speculative decoding speed; test the finished model in ComfyUI.
+
 ## Usage
 
 1. Paste a Hugging Face model repository URL or `owner/repo`. Local safetensors files and already-downloaded checkpoint directories are also accepted.
@@ -72,8 +96,9 @@ Your installed patched ComfyUI and Kitchen branches must register these native f
 - `__init__.py`: ComfyUI legacy custom-node registration and management node
 - `service.py`: HF repository parsing, capability probing, download, conversion routing, status/cancellation and ComfyUI API
 - `native_lowbit_export.py`: built-in sharded W3A8/W5A8 conversion and native safetensors serialization
+- `mtp_tools.py`: comparison and optional restored MTP overlay for every format
 - `web/main.js`: in-node progress and controls
-- `tests/test_service.py` and `tests/test_lowbit.py`: input, format and checkpoint safety tests
+- `tests/test_service.py`, `tests/test_lowbit.py`, `tests/test_mtp.py`: input, format, MTP and checkpoint safety tests
 
 ## Test
 
