@@ -277,63 +277,94 @@ def _write_tensor(spool, name: str, tensor) -> dict:
                 path=None, start=start, size=len(payload))
 
 
-def _quantize_one(reader, name: str, shape: list[int], fmt: str, device, spool, budget: int):
+def _quantize_one(reader, name: str, shape: list[int], fmt: str, device,
+                  spool, budget: int, calibration=None, hessian_block=128,
+                  damping=0.05):
+    """Serialize one layer with original, or activation-calibrated, precision.
+
+    calibration is (train_x, holdout_x), both real captured module inputs.
+    """
     import torch
     from comfy_kitchen.tensor import QuantizedTensor
     from comfy_kitchen.tensor.w4a8_packed import (
         default_w4a8_codebook, nested_w4a8_codebook, pack_w4a8_mma_weight)
-    cb = (default_w4a8_codebook(3) if fmt == "w3a8"
-          else nested_w4a8_codebook()).to(device)
+    if fmt not in ("w3a8", "w4a8", "w5a8"):
+        raise ValueError(f"Invalid per-layer format {fmt}.")
+    bits = {"w3a8":3, "w4a8":4, "w5a8":5}[fmt]
+    cb = (nested_w4a8_codebook() if bits == 5
+          else default_w4a8_codebook(bits)).to(device)
+    if calibration is not None and bits == 5:
+        raise ValueError("W5A8 cannot be GPTQ calibrated by the W3/W4 optimizer.")
     n, k = shape
-    # Only canonical layer weights are quantized. Keep embeddings, final heads,
-    # norms, recurrent controls and vision at source precision.
     parts: dict[str, list] = {}
     rows = _chunk_rows(n, k, fmt, budget)
+    prepared = None
+    metrics = []
+    if calibration is not None:
+        try:
+            from .calibration_math import calibrated_candidate, prepare_calibration, combine_metrics
+        except ImportError:
+            from calibration_math import calibrated_candidate, prepare_calibration, combine_metrics
+        train, valid = calibration
+        with torch.no_grad():
+            prepared = prepare_calibration(train.to(device), valid.to(device),
+                                           hessian_block=hessian_block, damp=damping)
     for lo in range(0, n, rows):
         hi = min(lo + rows, n)
         w = reader.get_slice(name)[lo:hi].to(device=device)
-        qt = QuantizedTensor.from_float(
-            w, "AsymW4A8Int8Layout", bits=3 if fmt == "w3a8" else 5,
-            group_size=16, convrot_groupsize=256,
-            codebook=True, codebook_tensor=cb)
-        if fmt == "w3a8":
-            packed = qt.state_dict(name)
-            current = {
-                "weight": packed[name],
-                "weight_s_rel": packed[name + "_s_rel"],
-                "weight_s_channel": packed[name + "_s_channel"],
-            }
-        else:
-            packed, tier = pack_w4a8_mma_weight(qt._qdata, qt._params.scale, lsb_tier=True)
-            current = {
-                "weight": packed,
-                "weight_s_channel": qt._params.s_channel,
-                "weight_lsb_tier": tier,
-            }
+        with torch.no_grad():
+            if calibration is not None:
+                tensors, score = calibrated_candidate(
+                    w, train, valid, bits=bits, hessian_block=hessian_block,
+                    damp=damping, prepared=prepared)
+                metrics.append((score, hi-lo))
+                current = {
+                    "weight": tensors["weight"],
+                    "weight_s_rel": tensors["weight_s_rel"],
+                    "weight_s_channel": tensors["weight_s_channel"],
+                }
+            else:
+                qt = QuantizedTensor.from_float(
+                    w, "AsymW4A8Int8Layout", bits=bits,
+                    group_size=16, convrot_groupsize=256,
+                    codebook=True, codebook_tensor=cb)
+                if fmt in ("w3a8", "w4a8"):
+                    packed = qt.state_dict(name)
+                    current = {
+                        "weight": packed[name],
+                        "weight_s_rel": packed[name + "_s_rel"],
+                        "weight_s_channel": packed[name + "_s_channel"],
+                    }
+                else:
+                    packed, tier = pack_w4a8_mma_weight(
+                        qt._qdata, qt._params.scale, lsb_tier=True)
+                    current = {
+                        "weight": packed,
+                        "weight_s_channel": qt._params.s_channel,
+                        "weight_lsb_tier": tier,
+                    }
         for suffix, data in current.items():
-            # GPU allocations are freed each row group, not retained until
-            # the entire checkpoint has been converted.
             parts.setdefault(suffix, []).append(data.detach().cpu())
-        del qt, w
+        del w
     out = {}
     for suffix, arrays in parts.items():
         t = torch.cat(arrays, dim=0)
         if fmt == "w5a8" and suffix in ("weight", "weight_lsb_tier"):
             t = t.flatten()
-        out[name if suffix == "weight" else name[:-len("weight")] + suffix] = _write_tensor(
-            spool, name, t)
-        del t, arrays
+        key = name if suffix == "weight" else name[:-len("weight")] + suffix
+        out[key] = _write_tensor(spool, key, t)
     prefix = name[:-len("weight")]
     out[prefix + "weight_codebook"] = _write_tensor(
-        spool, name, cb.cpu().to(torch.float32))
-    conf = {"format": LOWBIT_FORMATS[fmt], "convrot_groupsize": 256}
-    if fmt == "w3a8":
-        conf["group_size"] = 16
+        spool, prefix + "weight_codebook", cb.cpu().to(torch.float32))
+    cfg = {"format": "asym_w4a8_int8" if bits == 4 else
+           LOWBIT_FORMATS.get(fmt), "convrot_groupsize":256}
+    if fmt == "w5a8":
+        cfg["downgrade"] = 0
     else:
-        conf["downgrade"] = 0
-    out[prefix + "comfy_quant"] = _write_tensor(
-        spool, name, torch.tensor(list(json.dumps(conf).encode("utf-8")), dtype=torch.uint8))
-    return out
+        cfg["group_size"] = 16
+    encoded = torch.tensor(list(json.dumps(cfg).encode("utf-8")), dtype=torch.uint8)
+    out[prefix + "comfy_quant"] = _write_tensor(spool, prefix + "comfy_quant", encoded)
+    return out, (combine_metrics(metrics) if metrics else None)
 
 
 def _copy_payload(source, dest, offset: int, size: int):
